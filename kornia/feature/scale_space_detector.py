@@ -272,14 +272,8 @@ class Detector_config(TypedDict):
 
 def get_default_detector_config() -> Detector_config:
     """Return default config."""
-    return {
-        # Extraction Parameters
-        "nms_size": 15,
-        "pyramid_levels": 4,
-        "up_levels": 1,
-        "scale_factor_levels": math.sqrt(2),
-        "s_mult": 22.0,
-    }
+    # Return a shallow copy to avoid unintended mutation
+    return _PRECOMPUTED_DEFAULT_DETECTOR_CONFIG.copy()
 
 
 class MultiResolutionDetector(Module):
@@ -437,3 +431,12 @@ class MultiResolutionDetector(Module):
         lafs = self.aff(lafs, img)
         lafs = self.ori(lafs, img)
         return lafs, responses
+
+
+_PRECOMPUTED_DEFAULT_DETECTOR_CONFIG = {
+    "nms_size": 15,
+    "pyramid_levels": 4,
+    "up_levels": 1,
+    "scale_factor_levels": math.sqrt(2),
+    "s_mult": 22.0,
+}
