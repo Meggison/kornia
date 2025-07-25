@@ -15,6 +15,8 @@
 # limitations under the License.
 #
 
+from __future__ import annotations
+
 import importlib.util
 import platform
 import sys
@@ -22,7 +24,8 @@ import warnings
 from dataclasses import asdict, fields, is_dataclass
 from functools import wraps
 from inspect import isclass, isfunction
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple, Type, TypeVar, Union, overload
+from typing import (TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple,
+                    Type, TypeVar, Union, overload)
 
 import torch
 from torch.linalg import inv_ex
@@ -204,18 +207,23 @@ def _torch_svd_cast(input: Tensor) -> Tuple[Tensor, Tensor, Tensor]:
 
     NOTE: in torch 1.8.1 this function is recommended to use as torch.linalg.svd
     """
-    # if not isinstance(input, torch.Tensor):
-    #    raise AssertionError(f"Input must be torch.Tensor. Got: {type(input)}.")
+    # torch.linalg.svd dominates runtime; input.to(dtype) is already optimal.
     dtype = input.dtype
-    if dtype not in (torch.float32, torch.float64):
-        dtype = torch.float32
-
-    out1, out2, out3H = torch.linalg.svd(input.to(dtype))
-    if torch_version_ge(1, 11):
-        out3 = out3H.mH
+    # Only cast if needed.
+    if dtype in (torch.float32, torch.float64):
+        in_cast = input
+        needed_dtype = dtype
     else:
-        out3 = out3H.transpose(-1, -2)
-    return (out1.to(input.dtype), out2.to(input.dtype), out3.to(input.dtype))
+        in_cast = input.to(torch.float32)
+        needed_dtype = torch.float32
+
+    out1, out2, out3H = torch.linalg.svd(in_cast)
+    out3 = out3H.mH if torch_version_ge(1, 11) else out3H.transpose(-1, -2)
+    # Only cast output if needed.
+    if dtype == needed_dtype:
+        return out1, out2, out3
+    else:
+        return out1.to(dtype), out2.to(dtype), out3.to(dtype)
 
 
 def _torch_linalg_svdvals(input: Tensor) -> Tensor:

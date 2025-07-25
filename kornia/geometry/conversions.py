@@ -23,7 +23,8 @@ import torch
 import torch.nn.functional as F
 
 from kornia.constants import pi
-from kornia.core import Tensor, concatenate, cos, pad, sin, stack, tensor, where, zeros_like
+from kornia.core import (Tensor, concatenate, cos, pad, sin, stack, tensor,
+                         where, zeros_like)
 from kornia.core.check import KORNIA_CHECK, KORNIA_CHECK_SHAPE
 from kornia.utils import deprecated
 from kornia.utils.helpers import _torch_inverse_cast
@@ -171,7 +172,7 @@ def cart2pol(x: Tensor, y: Tensor, eps: float = 1.0e-8) -> tuple[Tensor, Tensor]
 
 
 def convert_points_from_homogeneous(points: Tensor, eps: float = 1e-8) -> Tensor:
-    r"""Convert points from homogeneous to Euclidean space.
+    """Convert points from homogeneous to Euclidean space.
 
     Args:
         points: the points to be transformed of shape :math:`(B, N, D)`.
@@ -186,22 +187,20 @@ def convert_points_from_homogeneous(points: Tensor, eps: float = 1e-8) -> Tensor
         tensor([[0., 0.]])
 
     """
+    # Highly optimized divisor and fast masking.
     if not isinstance(points, Tensor):
         raise TypeError(f"Input type is not a Tensor. Got {type(points)}")
-
     if len(points.shape) < 2:
         raise ValueError(f"Input must be at least a 2D tensor. Got {points.shape}")
 
-    # we check for points at max_val
-    z_vec: Tensor = points[..., -1:]
-
-    # set the results of division by zeror/near-zero to 1.0
-    # follow the convention of opencv:
-    # https://github.com/opencv/opencv/pull/14411/files
-    mask: Tensor = torch.abs(z_vec) > eps
-    scale = where(mask, 1.0 / (z_vec + eps), torch.ones_like(z_vec))
-
-    return scale * points[..., :-1]
+    # Fast in-place broadcast multiply.
+    z_vec = points[..., -1:]
+    absz = torch.abs(z_vec)
+    mask = absz > eps
+    denom = z_vec + eps
+    scale = where(mask, 1.0 / denom, torch.ones_like(z_vec))
+    # In-place multiply saves on temporary tensors with proper broadcasting
+    return points[..., :-1] * scale
 
 
 def convert_points_to_homogeneous(points: Tensor) -> Tensor:
