@@ -15,6 +15,8 @@
 # limitations under the License.
 #
 
+from __future__ import annotations
+
 from typing import Dict, Optional, Tuple, Union
 
 import torch
@@ -69,79 +71,92 @@ class CropGenerator(RandomGeneratorBase):
         _device, _dtype = _extract_device_dtype([self.size if isinstance(self.size, Tensor) else None])
 
         if batch_size == 0:
+            zero_out = zeros([0, 4, 2], device=_device, dtype=_dtype)
             return {
-                "src": zeros([0, 4, 2], device=_device, dtype=_dtype),
-                "dst": zeros([0, 4, 2], device=_device, dtype=_dtype),
+                "src": zero_out,
+                "dst": zero_out,
             }
 
         input_size = (batch_shape[-2], batch_shape[-1])
+
+        # Optimize tensor allocation and repeat pattern
         if not isinstance(self.size, Tensor):
-            size = tensor(self.size, device=_device, dtype=_dtype).repeat(batch_size, 1)
+            size = tensor(self.size, device=_device, dtype=_dtype).expand(batch_size, 2)
         else:
             size = self.size.to(device=_device, dtype=_dtype)
-        if size.shape != torch.Size([batch_size, 2]):
-            raise AssertionError(
-                "If `size` is a tensor, it must be shaped as (B, 2). "
-                f"Got {size.shape} while expecting {torch.Size([batch_size, 2])}."
-            )
+            if size.shape != torch.Size([batch_size, 2]):
+                raise AssertionError(
+                    "If `size` is a tensor, it must be shaped as (B, 2). "
+                    f"Got {size.shape} while expecting {torch.Size([batch_size, 2])}."
+                )
+
         if not (input_size[0] > 0 and input_size[1] > 0 and (size > 0).all()):
             raise AssertionError(f"Got non-positive input size or size. {input_size}, {size}.")
-        size = size.floor()
 
-        x_diff = input_size[1] - size[:, 1] + 1
-        y_diff = input_size[0] - size[:, 0] + 1
+        # For efficiency, only call floor once
+        size = torch.floor(size)
 
-        # Start point will be 0 if diff < 0
-        x_diff = x_diff.clamp(0)
-        y_diff = y_diff.clamp(0)
+        # Calculate differences in vectorized way
+        x_diff = (input_size[1] - size[:, 1] + 1).clamp_min(0)
+        y_diff = (input_size[0] - size[:, 0] + 1).clamp_min(0)
 
-        if same_on_batch:
-            # If same_on_batch, select the first then repeat.
-            x_start = (
-                _adapted_rsampling((batch_size,), self.rand_sampler, same_on_batch).to(x_diff) * x_diff[0]
-            ).floor()
-            y_start = (
-                _adapted_rsampling((batch_size,), self.rand_sampler, same_on_batch).to(y_diff) * y_diff[0]
-            ).floor()
-        else:
-            x_start = (_adapted_rsampling((batch_size,), self.rand_sampler, same_on_batch).to(x_diff) * x_diff).floor()
-            y_start = (_adapted_rsampling((batch_size,), self.rand_sampler, same_on_batch).to(y_diff) * y_diff).floor()
+        # Avoid repeated .to; fuse random/conversion/mul/floor. Use local function to avoid code duplication.
+        def _random_start(diff):
+            # diff: shape (B,)
+            vals = _adapted_rsampling((batch_size,), self.rand_sampler, same_on_batch)
+            vals = vals.to(diff)
+            if same_on_batch:
+                diff_val = diff[0]
+            else:
+                diff_val = diff
+            starts = torch.floor(vals * diff_val)
+            return starts
+
+        x_start = _random_start(x_diff)
+        y_start = _random_start(y_diff)
+
+        sx = where(size[:, 1] == 0, tensor(input_size[1], device=_device, dtype=_dtype), size[:, 1])
+        sy = where(size[:, 0] == 0, tensor(input_size[0], device=_device, dtype=_dtype), size[:, 0])
+
+        # Avoid unnecessary view/copy if already 1D
+        x_start_flat = x_start.to(device=_device, dtype=_dtype)
+        y_start_flat = y_start.to(device=_device, dtype=_dtype)
         crop_src = bbox_generator(
-            x_start.view(-1).to(device=_device, dtype=_dtype),
-            y_start.view(-1).to(device=_device, dtype=_dtype),
-            where(size[:, 1] == 0, tensor(input_size[1], device=_device, dtype=_dtype), size[:, 1]),
-            where(size[:, 0] == 0, tensor(input_size[0], device=_device, dtype=_dtype), size[:, 0]),
+            x_start_flat,
+            y_start_flat,
+            sx,
+            sy,
         )
 
         if self.resize_to is None:
-            crop_dst = bbox_generator(
-                tensor([0] * batch_size, device=_device, dtype=_dtype),
-                tensor([0] * batch_size, device=_device, dtype=_dtype),
-                size[:, 1],
-                size[:, 0],
-            )
+            zeros_start = torch.zeros(batch_size, device=_device, dtype=_dtype)
+            crop_dst = bbox_generator(zeros_start, zeros_start, size[:, 1], size[:, 0])
             _output_size = size.to(dtype=torch.long)
         else:
             if not (
                 len(self.resize_to) == 2
-                and isinstance(self.resize_to[0], (int,))
-                and isinstance(self.resize_to[1], (int,))
+                and isinstance(self.resize_to[0], int)
+                and isinstance(self.resize_to[1], int)
                 and self.resize_to[0] > 0
                 and self.resize_to[1] > 0
             ):
                 raise AssertionError(f"`resize_to` must be a tuple of 2 positive integers. Got {self.resize_to}.")
-            crop_dst = tensor(
-                [
+            # Construct bounding box directly as one tensor and repeat; avoid python list overhead
+            resize_bbox = (
+                torch.tensor(
                     [
                         [0, 0],
                         [self.resize_to[1] - 1, 0],
                         [self.resize_to[1] - 1, self.resize_to[0] - 1],
                         [0, self.resize_to[0] - 1],
-                    ]
-                ],
-                device=_device,
-                dtype=_dtype,
-            ).repeat(batch_size, 1, 1)
+                    ],
+                    device=_device,
+                    dtype=_dtype,
+                )
+                .unsqueeze(0)
+                .expand(batch_size, 4, 2)
+            )
+            crop_dst = resize_bbox
             _output_size = tensor(self.resize_to, device=_device, dtype=torch.long).expand(batch_size, -1)
 
         _input_size = tensor(input_size, device=_device, dtype=torch.long).expand(batch_size, -1)
