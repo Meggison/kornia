@@ -55,6 +55,8 @@ class LazyLoader:
         self.module_name = module_name
         self.module: Optional[ModuleType] = None
         self.dev_dependency = dev_dependency
+        # Avoid repeated hasattr/assignment for the auto_install flag
+        self.auto_install = False
 
     def _install_package(self, module_name: str) -> None:
         logger.info(f"Installing `{module_name}` ...")
@@ -66,54 +68,63 @@ class LazyLoader:
         This method is called internally when an attribute of the module is accessed for the first time. It attempts to
         import the module and raises an ImportError with a custom message if the module is not installed.
         """
+        # Fast exit for doctest and sphinx
         if not self.dev_dependency:
-            if "--doctest-modules" in sys.argv:
+            # Micro-optimization: cache sys.argv to a local
+            argv = sys.argv
+            if _DOCTEST_ARG in argv:
                 logger.info(f"Doctest detected, skipping loading of '{self.module_name}'")
                 return
-            try:
-                if __sphinx_build__:  # type:ignore
-                    logger.info(f"Sphinx detected, skipping loading of '{self.module_name}'")
-                    return
-            except NameError:
-                pass
+            if self._is_sphinx_build():
+                logger.info(f"Sphinx detected, skipping loading of '{self.module_name}'")
+                return
 
-        if self.module is None:
-            try:
-                self.module = importlib.import_module(self.module_name)
-            except ImportError as e:
-                if kornia_config.lazyloader.installation_mode == InstallationMode.AUTO or self.auto_install:
-                    self._install_package(self.module_name)
-                elif kornia_config.lazyloader.installation_mode == InstallationMode.ASK:
-                    to_ask = True
-                    if_install = input(
-                        f"Optional dependency '{self.module_name}' is not installed. "
-                        "You may silent this prompt by `kornia_config.lazyloader.installation_mode = 'auto'`. "
-                        "Do you wish to install the dependency? [Y]es, [N]o, [A]ll."
-                    )
-                    while to_ask:
-                        if if_install.lower() == "y" or if_install.lower() == "yes":
-                            self._install_package(self.module_name)
-                            self.module = importlib.import_module(self.module_name)
-                            to_ask = False
-                        elif if_install.lower() == "a" or if_install.lower() == "all":
-                            self.auto_install = True
-                            self._install_package(self.module_name)
-                            self.module = importlib.import_module(self.module_name)
-                            to_ask = False
-                        elif if_install.lower() == "n" or if_install.lower() == "no":
-                            raise ImportError(
-                                f"Optional dependency '{self.module_name}' is not installed. "
-                                f"Please install it to use this functionality."
-                            ) from e
-                        else:
-                            if_install = input("Invalid input. Please enter 'Y', 'N', or 'A'.")
+        # Only import once
+        if self.module is not None:
+            return
 
-                elif kornia_config.lazyloader.installation_mode == InstallationMode.RAISE:
-                    raise ImportError(
-                        f"Optional dependency '{self.module_name}' is not installed. "
-                        f"Please install it to use this functionality."
-                    ) from e
-                self.module = importlib.import_module(self.module_name)
+        try:
+            self.module = importlib.import_module(self.module_name)
+            return
+        except ImportError as e:
+            installation_mode = kornia_config.lazyloader.installation_mode
+            # Fast-path for AUTO
+            if installation_mode == _AUTO or self.auto_install:
+                self._install_package(self.module_name)
+            elif installation_mode == _ASK:
+                # Prompt only if needed
+                prompt = (
+                    f"Optional dependency '{self.module_name}' is not installed. "
+                    "You may silent this prompt by `kornia_config.lazyloader.installation_mode = 'auto'`. "
+                    "Do you wish to install the dependency? [Y]es, [N]o, [A]ll."
+                )
+                valid_yes = {"y", "yes"}
+                valid_no = {"n", "no"}
+                valid_all = {"a", "all"}
+                while True:
+                    if_install = input(prompt)
+                    lower = if_install.strip().lower()
+                    if lower in valid_yes:
+                        self._install_package(self.module_name)
+                        break
+                    elif lower in valid_all:
+                        self.auto_install = True
+                        self._install_package(self.module_name)
+                        break
+                    elif lower in valid_no:
+                        raise ImportError(
+                            f"Optional dependency '{self.module_name}' is not installed. "
+                            f"Please install it to use this functionality."
+                        ) from e
+                    else:
+                        prompt = "Invalid input. Please enter 'Y', 'N', or 'A'."
+            elif installation_mode == _RAISE:
+                raise ImportError(
+                    f"Optional dependency '{self.module_name}' is not installed. "
+                    f"Please install it to use this functionality."
+                ) from e
+            # After installation, try to import again
+            self.module = importlib.import_module(self.module_name)
 
     def __getattr__(self, item: str) -> object:
         """Load the module (if not already loaded) and returns the requested attribute.
@@ -141,8 +152,18 @@ class LazyLoader:
             list: The list of attributes of the loaded module.
 
         """
-        self._load()
-        return dir(self.module)
+        # Micro-optimization: shortcut if already loaded
+        module = self.module
+        if module is None:
+            self._load()
+            module = self.module
+        return dir(module)
+
+    def _is_sphinx_build(self):
+        """Fast inline check for __sphinx_build__ global, without exception overhead unless present."""
+        # Micro-optimization: Only check if symbol is present, avoiding try/except unless likely needed
+        frame = sys._getframe(1)
+        return frame.f_globals.get("__sphinx_build__", False)
 
 
 # NOTE: This section is used for lazy loading of external modules. However, sphinx
@@ -160,3 +181,11 @@ segmentation_models_pytorch = LazyLoader("segmentation_models_pytorch")
 basicsr = LazyLoader("basicsr")
 requests = LazyLoader("requests")
 ivy = LazyLoader("ivy")
+
+_DOCTEST_ARG = "--doctest-modules"
+
+_AUTO = InstallationMode.AUTO
+
+_ASK = InstallationMode.ASK
+
+_RAISE = InstallationMode.RAISE
