@@ -95,11 +95,10 @@ class KMeans:
             2D Tensor with num_cluster rows
 
         """
-        num_samples: int = len(X)
-        perm = torch.randperm(num_samples, device=X.device)
-        idx = perm[:num_clusters]
-        initial_state = X[idx]
-        return initial_state
+        # Optimize by avoiding unnecessary intermediate variables, direct slicing, and early type establishment.
+        # Efficient slicing and avoiding Shadowing variables
+        idx = torch.randperm(X.shape[0], device=X.device)[:num_clusters]
+        return X.index_select(0, idx)
 
     def _pairwise_euclidean_distance(self, data1: Tensor, data2: Tensor) -> Tensor:
         """Compute pairwise squared distance between 2 sets of vectors.
