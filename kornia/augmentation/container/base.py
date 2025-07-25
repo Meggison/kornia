@@ -28,7 +28,8 @@ from kornia.core import Module, Tensor
 from kornia.geometry.boxes import Boxes
 from kornia.geometry.keypoints import Keypoints
 
-from .ops import BoxSequentialOps, InputSequentialOps, KeypointSequentialOps, MaskSequentialOps
+from .ops import (BoxSequentialOps, InputSequentialOps, KeypointSequentialOps,
+                  MaskSequentialOps)
 from .params import ParamItem
 
 __all__ = ["BasicSequentialBase", "ImageSequentialBase", "SequentialBase"]
@@ -99,9 +100,11 @@ class BasicSequentialBase(nn.Sequential):
         raise NotImplementedError
 
     def get_children_by_indices(self, indices: Tensor) -> Iterator[Tuple[str, Module]]:
+        # Optimization: This method is shadowed by ImageSequential.get_children_by_indices,
+        # which is heavily optimized with cache.
         modules = list(self.named_children())
         for idx in indices:
-            yield modules[idx]
+            yield modules[int(idx)]
 
     def get_children_by_params(self, params: List[ParamItem]) -> Iterator[Tuple[str, Module]]:
         modules = list(self.named_children())

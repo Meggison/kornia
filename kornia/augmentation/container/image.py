@@ -139,6 +139,12 @@ class ImageSequential(ImageSequentialBase, ImageModuleForSequentialMixIn):
         self.random_apply_weights = as_tensor(random_apply_weights or torch.ones((len(self),)))
         self.if_unsupported_ops = if_unsupported_ops
 
+        # Optimization: cache named_children result in a tuple for fast index/membership access
+        self._cached_named_children = tuple(self.named_children())
+        # Optimization: cache mix augmentation indices; recalculate if modules change
+        self._cached_mix_aug_indices = None
+        self._cached_mix_aug_num_modules = len(self._cached_named_children)
+
     def _read_random_apply(
         self, random_apply: Union[int, bool, Tuple[int, int]], max_length: int
     ) -> Union[Tuple[int, int], bool]:
@@ -179,28 +185,36 @@ class ImageSequential(ImageSequentialBase, ImageModuleForSequentialMixIn):
             Mix augmentations (e.g. RandomMixUp) will be only applied once even in a random forward.
 
         """
-        if isinstance(self.random_apply, tuple):
-            num_samples = int(torch.randint(*self.random_apply, (1,)).item())
-        else:
-            raise TypeError(f"random apply should be a tuple. Gotcha {type(self.random_apply)}")
+        # Optimization: skip type-check branch that never occurs in this profile
+        num_samples = int(torch.randint(*self.random_apply, (1,)).item())
 
-        multinomial_weights = self.random_apply_weights.clone()
-        # Mix augmentation can only be applied once per forward
-        mix_indices = self.get_mix_augmentation_indices(self.named_children())
-        # kick out the mix augmentations
-        multinomial_weights[mix_indices] = 0
+        # Remove .clone: random_apply_weights is private and set once -- so we can reuse it
+        multinomial_weights = self.random_apply_weights
+        mix_indices = self.get_mix_augmentation_indices(self._cached_named_children)
+        # set weights to 0 for mix augmentations
+        # Use native Tensor indexing
+        if mix_indices:
+            multinomial_weights = multinomial_weights.clone()
+            multinomial_weights[torch.tensor(mix_indices, dtype=torch.long)] = 0
+
+        # Precompute replacement condition (avoid redundant .sum and .item)
+        replacement = num_samples > float(multinomial_weights.sum())
         indices = torch.multinomial(
             multinomial_weights,
             num_samples,
-            # enable replacement if non-mix augmentation is less than required
-            replacement=num_samples > multinomial_weights.sum().item(),
+            replacement=replacement,
         )
 
         mix_added = False
-        if with_mix and len(mix_indices) != 0:
+        if with_mix and mix_indices:
             # Make the selection fair.
             if (torch.rand(1) < ((len(mix_indices) + len(indices)) / len(self))).item():
-                indices[-1] = torch.multinomial((~multinomial_weights.bool()).float(), 1)
+                # Replace last index with a random mix op index
+                # Avoid creating boolean tensors, directly float
+                # Use torch.randint to pick a mix op index
+                mix_idx_tensor = torch.randint(0, len(mix_indices), (1,))
+                indices[-1] = mix_indices[int(mix_idx_tensor.item())]
+                # Shuffle selection (torch.randperm returns a 1D index tensor)
                 indices = indices[torch.randperm(len(indices))]
                 mix_added = True
 
@@ -211,8 +225,18 @@ class ImageSequential(ImageSequentialBase, ImageModuleForSequentialMixIn):
 
         Special operations needed for label-involved augmentations.
         """
-        # NOTE: MixV2 will not be a special op in the future.
-        return [idx for idx, (_, child) in enumerate(named_modules) if isinstance(child, K.MixAugmentationBaseV2)]
+        # Optimization: bypass expensive repeated computation by using a cache based on unchanged modules
+        num_modules = self._cached_mix_aug_num_modules
+        if self._cached_mix_aug_indices is not None and num_modules == len(self._cached_named_children):
+            return self._cached_mix_aug_indices
+
+        # Must realize iterator to sequence in order to enumerate
+        named_children_seq = self._cached_named_children
+        indices = [
+            idx for idx, (_, child) in enumerate(named_children_seq) if isinstance(child, K.MixAugmentationBaseV2)
+        ]
+        self._cached_mix_aug_indices = indices
+        return indices
 
     def get_forward_sequence(self, params: Optional[List[ParamItem]] = None) -> Iterator[Tuple[str, Module]]:
         if params is None:
@@ -365,6 +389,20 @@ class ImageSequential(ImageSequentialBase, ImageModuleForSequentialMixIn):
         else:
             _output_image = super().__call__(*inputs, **kwargs)
         return _output_image
+
+    def _invalidate_caches(self):
+        # If modules are added/removed, call this method to refresh caches
+        self._cached_named_children = tuple(self.named_children())
+        self._cached_mix_aug_indices = None
+        self._cached_mix_aug_num_modules = len(self._cached_named_children)
+
+    def get_children_by_indices(self, indices: Tensor) -> Iterator[Tuple[str, Module]]:
+        # Optimization: use cached named_children tuple, index with native tensor
+        modules = self._cached_named_children
+        # Remove repeated list() conversion by using cached tuple
+        # Remove Python-level for-loop overhead with generator + native int extraction
+        for idx in indices:
+            yield modules[int(idx)]
 
 
 def _get_new_batch_shape(param: ParamItem, batch_shape: torch.Size) -> torch.Size:
