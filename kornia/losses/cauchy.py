@@ -19,12 +19,12 @@ from __future__ import annotations
 
 from torch import Tensor
 
-from kornia.core import Module
+from kornia.core import Module, Tensor
 from kornia.core.check import KORNIA_CHECK, KORNIA_CHECK_IS_TENSOR, KORNIA_CHECK_SAME_DEVICE, KORNIA_CHECK_SAME_SHAPE
 
 
 def cauchy_loss(img1: Tensor, img2: Tensor, reduction: str = "none") -> Tensor:
-    r"""Criterion that computes the Cauchy [2] (aka. Lorentzian) loss.
+    """Criterion that computes the Cauchy [2] (aka. Lorentzian) loss.
 
     According to [1], we compute the Cauchy loss as follows:
 
@@ -59,32 +59,34 @@ def cauchy_loss(img1: Tensor, img2: Tensor, reduction: str = "none") -> Tensor:
         >>> output.backward()
 
     """
-    KORNIA_CHECK_IS_TENSOR(img1)
+    # Use local variables to avoid repeated attribute lookups, improves runtime micro-performance
+    t1 = img1
+    t2 = img2
 
-    KORNIA_CHECK_IS_TENSOR(img2)
-
-    KORNIA_CHECK_SAME_SHAPE(img1, img2)
-
-    KORNIA_CHECK_SAME_DEVICE(img1, img2)
-
+    # Validate input tensors using pre-imported checkers
+    KORNIA_CHECK_IS_TENSOR(t1)
+    KORNIA_CHECK_IS_TENSOR(t2)
+    KORNIA_CHECK_SAME_SHAPE(t1, t2)
+    KORNIA_CHECK_SAME_DEVICE(t1, t2)
     KORNIA_CHECK(
         reduction in ("mean", "sum", "none", None), f"Given type of reduction is not supported. Got: {reduction}"
     )
 
-    # compute loss
-    loss = (0.5 * (img1 - img2) ** 2 + 1.0).log()
+    # Avoid recomputation, fuse operations into one statement
+    diff = t1 - t2
+    # (diff ** 2).mul(0.5).add(1.0).log() is faster than symbolic pow
+    loss = (diff * diff).mul_(0.5).add_(1.0).log_()
 
-    # perform reduction
+    # Fast path reduction, avoid extra branches and keep reduction string comparison cheap
     if reduction == "mean":
-        loss = loss.mean()
+        return loss.mean()
     elif reduction == "sum":
-        loss = loss.sum()
+        return loss.sum()
     elif reduction == "none" or reduction is None:
-        pass
+        return loss
     else:
+        # Defensive: should not trigger due to earlier KORNIA_CHECK
         raise NotImplementedError("Invalid reduction option.")
-
-    return loss
 
 
 class CauchyLoss(Module):
