@@ -348,9 +348,19 @@ def keypoints_to_grid(keypoints: Tensor, img_size: Tuple[int, int]) -> Tensor:
 
 def batched_linspace(start: Tensor, end: Tensor, step: int, dim: int) -> Tensor:
     """Batch version of torch.normalize (similar to the numpy one)."""
-    intervals = ((end - start) / (step - 1)).unsqueeze(dim)
-    broadcast_size = [1] * len(intervals.shape)
-    broadcast_size[dim] = step
-    samples = torch.arange(step, dtype=torch.float, device=start.device).reshape(broadcast_size)
-    samples = start.unsqueeze(dim) + samples * intervals
+    # Compute intervals and prepare for efficient broadcasting without explicit unsqueeze and reshape
+    intervals = (end - start) / (step - 1)
+    shape = list(start.shape)
+    shape.insert(dim, step)
+    # Create steps tensor and expand for broadcasting
+    steps = torch.arange(step, dtype=start.dtype, device=start.device)
+    # Shape [1, 1, ..., step, ..., 1]
+    steps_shape = [1] * (start.dim() + 1)
+    steps_shape[dim] = step
+    steps = steps.view(steps_shape)
+    # Compute the linspace in a broadcasted way
+    # Use efficient broadcasting -- expand start/intervals for broadcasting, add in one op
+    start_b = start.unsqueeze(dim)
+    intervals_b = intervals.unsqueeze(dim)
+    samples = start_b + steps * intervals_b
     return samples
