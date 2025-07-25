@@ -26,7 +26,7 @@ from kornia.core import Tensor
 
 
 def rgb_to_xyz(image: Tensor) -> Tensor:
-    r"""Convert a RGB image to XYZ.
+    """Convert a RGB image to XYZ.
 
     .. image:: _static/img/rgb_to_xyz.png
 
@@ -47,15 +47,24 @@ def rgb_to_xyz(image: Tensor) -> Tensor:
     if len(image.shape) < 3 or image.shape[-3] != 3:
         raise ValueError(f"Input size must have a shape of (*, 3, H, W). Got {image.shape}")
 
-    r: Tensor = image[..., 0, :, :]
-    g: Tensor = image[..., 1, :, :]
-    b: Tensor = image[..., 2, :, :]
+    # Prepare conversion matrix as Tensor
+    # [[0.412453, 0.357580, 0.180423],
+    #  [0.212671, 0.715160, 0.072169],
+    #  [0.019334, 0.119193, 0.950227]]
+    M = torch.tensor(
+        [
+            [0.412453, 0.357580, 0.180423],
+            [0.212671, 0.715160, 0.072169],
+            [0.019334, 0.119193, 0.950227],
+        ],
+        dtype=image.dtype,
+        device=image.device,
+    )
 
-    x: Tensor = 0.412453 * r + 0.357580 * g + 0.180423 * b
-    y: Tensor = 0.212671 * r + 0.715160 * g + 0.072169 * b
-    z: Tensor = 0.019334 * r + 0.119193 * g + 0.950227 * b
-
-    out: Tensor = torch.stack([x, y, z], -3)
+    # image: (..., 3, H, W), M: (3, 3)
+    # Output: (..., 3, H, W)
+    # This performs the color transformation efficiently per pixel and channel
+    out = torch.tensordot(image, M, dims=([image.ndim - 3], [1])).movedim(-1, -3)
 
     return out
 
