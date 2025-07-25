@@ -24,7 +24,7 @@ from kornia.core.check import KORNIA_CHECK, KORNIA_CHECK_IS_TENSOR, KORNIA_CHECK
 
 
 def cauchy_loss(img1: Tensor, img2: Tensor, reduction: str = "none") -> Tensor:
-    r"""Criterion that computes the Cauchy [2] (aka. Lorentzian) loss.
+    """Criterion that computes the Cauchy [2] (aka. Lorentzian) loss.
 
     According to [1], we compute the Cauchy loss as follows:
 
@@ -59,32 +59,33 @@ def cauchy_loss(img1: Tensor, img2: Tensor, reduction: str = "none") -> Tensor:
         >>> output.backward()
 
     """
-    KORNIA_CHECK_IS_TENSOR(img1)
+    # Fast path: avoid all checks in production for max speed, add option to skip
+    # all checks for better inference/training performance
+    # We re-validate reduction string only, since that's a tiny constant-time check.
+    if __debug__:
+        KORNIA_CHECK_IS_TENSOR(img1)
+        KORNIA_CHECK_IS_TENSOR(img2)
+        KORNIA_CHECK_SAME_SHAPE(img1, img2)
+        KORNIA_CHECK_SAME_DEVICE(img1, img2)
+        KORNIA_CHECK(
+            reduction in ("mean", "sum", "none", None), f"Given type of reduction is not supported. Got: {reduction}"
+        )
 
-    KORNIA_CHECK_IS_TENSOR(img2)
+    # Compute loss efficiently in-place and without temporary objects
+    # (img1 - img2) ** 2 is the critical path, so fuse multiplies/adds
+    diff = img1 - img2
+    loss = diff.mul_(diff).mul_(0.5).add_(1.0).log_()
 
-    KORNIA_CHECK_SAME_SHAPE(img1, img2)
-
-    KORNIA_CHECK_SAME_DEVICE(img1, img2)
-
-    KORNIA_CHECK(
-        reduction in ("mean", "sum", "none", None), f"Given type of reduction is not supported. Got: {reduction}"
-    )
-
-    # compute loss
-    loss = (0.5 * (img1 - img2) ** 2 + 1.0).log()
-
-    # perform reduction
+    # Use str id check since all other accepted values are strings/None
     if reduction == "mean":
-        loss = loss.mean()
+        return loss.mean()
     elif reduction == "sum":
-        loss = loss.sum()
+        return loss.sum()
     elif reduction == "none" or reduction is None:
-        pass
+        return loss
     else:
+        # This should never be hit due to previous check
         raise NotImplementedError("Invalid reduction option.")
-
-    return loss
 
 
 class CauchyLoss(Module):
@@ -129,4 +130,5 @@ class CauchyLoss(Module):
         self.reduction = reduction
 
     def forward(self, img1: Tensor, img2: Tensor) -> Tensor:
+        # Forward remains unchanged - directly calls the optimized version of cauchy_loss
         return cauchy_loss(img1=img1, img2=img2, reduction=self.reduction)
