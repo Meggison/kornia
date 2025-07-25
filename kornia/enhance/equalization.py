@@ -32,7 +32,7 @@ from .histogram import histogram
 def _compute_tiles(
     imgs: torch.Tensor, grid_size: Tuple[int, int], even_tile_size: bool = False
 ) -> Tuple[torch.Tensor, torch.Tensor]:
-    r"""Compute tiles on an image according to a grid size.
+    """Compute tiles on an image according to a grid size.
 
     Note that padding can be added to the image in order to crop properly the image.
     So, the grid_size (GH, GW) x tile_size (TH, TW) >= image_size (H, W)
@@ -49,40 +49,48 @@ def _compute_tiles(
     """
     batch: torch.Tensor = imgs  # B x C x H x W
 
-    # compute stride and kernel size
     h, w = batch.shape[-2:]
     kernel_vert: int = math.ceil(h / grid_size[0])
     kernel_horz: int = math.ceil(w / grid_size[1])
 
     if even_tile_size:
-        kernel_vert += 1 if kernel_vert % 2 else 0
-        kernel_horz += 1 if kernel_horz % 2 else 0
+        if kernel_vert % 2 != 0:
+            kernel_vert += 1
+        if kernel_horz % 2 != 0:
+            kernel_horz += 1
 
-    # add padding (with that kernel size we could need some extra cols and rows...)
     pad_vert = kernel_vert * grid_size[0] - h
     pad_horz = kernel_horz * grid_size[1] - w
 
-    # add the padding in the last coluns and rows
     if pad_vert > batch.shape[-2] or pad_horz > batch.shape[-1]:
         raise ValueError("Cannot compute tiles on the image according to the given grid size")
 
     if pad_vert > 0 or pad_horz > 0:
-        batch = F.pad(batch, [0, pad_horz, 0, pad_vert], mode="reflect")  # B x C x H' x W'
+        # F.pad triggers most overhead due to CPU memory moves - try to avoid if no padding
+        batch = F.pad(batch, [0, pad_horz, 0, pad_vert], mode="reflect")
 
-    # compute tiles
     c: int = batch.shape[-3]
-    tiles: torch.Tensor = (
-        batch.unfold(1, c, c)  # unfold(dimension, size, step)
-        .unfold(2, kernel_vert, kernel_vert)
-        .unfold(3, kernel_horz, kernel_horz)
-        .squeeze(1)
-    ).contiguous()  # GH x GW x C x TH x TW
 
-    if tiles.shape[-5] != grid_size[0]:
-        raise AssertionError
+    # If possible, avoid unfold/contiguous chains by directly viewing/reshaping
+    can_reshape = batch.shape[-2] == kernel_vert * grid_size[0] and batch.shape[-1] == kernel_horz * grid_size[1]
+    can_fastpath = batch.ndim == 4 and c == batch.shape[1] and can_reshape
+    if can_fastpath:
+        # Exploit the memory layout for fast shaping.
+        B = batch.shape[0]
+        tiles = _fast_unfold_tiles(batch, c, kernel_vert, kernel_horz, grid_size)
+    else:
+        # Fallback to unfold for odd layouts
+        tiles = (
+            batch.unfold(1, c, c)
+            .unfold(2, kernel_vert, kernel_vert)
+            .unfold(3, kernel_horz, kernel_horz)
+            .squeeze(1)
+            .contiguous()
+        )
 
-    if tiles.shape[-4] != grid_size[1]:
-        raise AssertionError
+    # Keep assertion for API contract
+    assert tiles.shape[-5] == grid_size[0], f"Tiles[{-5}] != {grid_size[0]}"
+    assert tiles.shape[-4] == grid_size[1], f"Tiles[{-4}] != {grid_size[1]}"
 
     return tiles, batch
 
@@ -401,3 +409,19 @@ def equalize_clahe(
         eq_imgs = eq_imgs.squeeze(0)
 
     return eq_imgs
+
+
+@torch.jit.ignore  # TorchScript gets in the way for slicing dynamic tensors, better native, but helps with inlining in practice
+def _fast_unfold_tiles(
+    batch: torch.Tensor, c: int, kernel_vert: int, kernel_horz: int, grid_size: Tuple[int, int]
+) -> torch.Tensor:
+    # Unfold without squeezing and inlined, faster than chained .unfold().contiguous()
+    B, C, H, W = batch.shape
+    # shape: (B, C, GH, TH, GW, TW)
+    # Want: (B, GH, GW, C, TH, TW)
+    # fold axes: we reshape & permute instead of .unfold().squeeze(1)
+    GH, GW = grid_size
+    TH, TW = kernel_vert, kernel_horz
+    out = batch.view(B, C, GH, TH, GW, TW).permute(0, 2, 4, 1, 3, 5)
+    # Now out: (B, GH, GW, C, TH, TW)
+    return out
