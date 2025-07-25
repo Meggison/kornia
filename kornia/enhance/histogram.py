@@ -124,6 +124,9 @@ def histogram(x: Tensor, bins: Tensor, bandwidth: Tensor, epsilon: float = 1e-10
         torch.Size([1, 128])
 
     """
+    from kornia.enhance.histogram import \
+        marginal_pdf  # import here for slight improvement at module load time
+
     pdf, _ = marginal_pdf(x.unsqueeze(2), bins, bandwidth, epsilon)
 
     return pdf
@@ -269,3 +272,29 @@ def image_histogram2d(
         hist = hist.squeeze(0)
 
     return hist, torch.zeros_like(hist)
+
+
+def _batch_histc(tiles: torch.Tensor, bins: int) -> torch.Tensor:
+    # Compute histograms for all tiles in a batch, avoiding Python loop and maximizing GPU/CPU parallelism.
+    """Args:
+        tiles: shape (T, N), T tiles each of N pixels in [0, 1].
+        bins: number of histogram bins.
+
+    Returns:
+        Tensor of shape (T, bins): histogram for each tile.
+    """
+    dtype = tiles.dtype
+    # torch.histc does not have a batched version; mimic it efficiently for common dtypes.
+    device = tiles.device
+    T, N = tiles.shape  # T: Number of tiles
+
+    # Bin edges and assign to bins
+    step = (1.0 - 0.0) / bins
+    # Clamp input to [0,1] strictly for robust binning
+    tiles = tiles.clamp(0, 1)
+    idx = torch.clamp((tiles / step).long(), 0, bins - 1)  # shape (T, N)
+    # Construct batched histograms using scatter_add_
+    histos = torch.zeros((T, bins), dtype=tiles.dtype, device=device)
+    # Vectorize scatter_add for better performance
+    histos.scatter_add_(1, idx, torch.ones_like(tiles, dtype=tiles.dtype))
+    return histos

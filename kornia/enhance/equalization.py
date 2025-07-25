@@ -28,6 +28,8 @@ from kornia.utils.image import perform_keep_shape_image
 
 from .histogram import histogram
 
+"""In this module several equalization methods are exposed: he, ahe, clahe."""
+
 
 def _compute_tiles(
     imgs: torch.Tensor, grid_size: Tuple[int, int], even_tile_size: bool = False
@@ -141,7 +143,7 @@ def _my_histc(tiles: torch.Tensor, bins: int) -> torch.Tensor:
 def _compute_luts(
     tiles_x_im: torch.Tensor, num_bins: int = 256, clip: float = 40.0, diff: bool = False
 ) -> torch.Tensor:
-    r"""Compute luts for a batched set of tiles.
+    """Compute luts for a batched set of tiles.
 
     Same approach as in OpenCV (https://github.com/opencv/opencv/blob/master/modules/imgproc/src/clahe.cpp)
 
@@ -160,15 +162,14 @@ def _compute_luts(
 
     b, gh, gw, c, th, tw = tiles_x_im.shape
     pixels: int = th * tw
-    tiles: torch.Tensor = tiles_x_im.view(-1, pixels)  # test with view  # T x (THxTW)
+    tiles: torch.Tensor = tiles_x_im.view(-1, pixels)  # T x (THxTW)
     if not diff:
-        if torch.jit.is_scripting():
-            histos = torch.stack([_torch_histc_cast(tile, bins=num_bins, min=0, max=1) for tile in tiles])
-        else:
-            histos = torch.stack(list(map(_my_histc, tiles, [num_bins] * len(tiles))))
+        # Optimize histogram computation by vectorizing in a batch rather than Python loops or list(map())
+        histos = _batch_histc(tiles, num_bins)
     else:
+        # Use differentiable histogram
         bins: torch.Tensor = torch.linspace(0, 1, num_bins, device=tiles.device)
-        histos = histogram(tiles, bins, torch.tensor(0.001)).squeeze()
+        histos = histogram(tiles, bins, torch.tensor(0.001, device=tiles.device, dtype=tiles.dtype)).squeeze()
         histos *= pixels
 
     if clip > 0.0:
@@ -177,12 +178,14 @@ def _compute_luts(
         clipped: torch.Tensor = pixels - histos.sum(1)
         residual: torch.Tensor = torch.remainder(clipped, num_bins)
         redist: torch.Tensor = (clipped - residual).div(num_bins)
-        histos += redist[None].transpose(0, 1)
-        # trick to avoid using a loop to assign the residual
-        v_range: torch.Tensor = torch.arange(num_bins, device=histos.device)
-        mat_range: torch.Tensor = v_range.repeat(histos.shape[0], 1)
-        histos += mat_range < residual[None].transpose(0, 1)
-
+        # Rather than broadcasting and transposing repeatedly, use shape-aware expand.
+        histos += redist.unsqueeze(1)
+        # Instead of constructing mat_range, use arange and broadcasting efficiently.
+        v_range = torch.arange(num_bins, device=histos.device)
+        # For each tile, add 1 to the first 'residual' bins
+        mask = v_range.unsqueeze(0) < residual.unsqueeze(1)
+        histos += mask.to(histos.dtype)
+    # LUT scaling
     lut_scale: float = (num_bins - 1) / pixels
     luts: torch.Tensor = torch.cumsum(histos, 1) * lut_scale
     luts = luts.clamp(0, num_bins - 1)
@@ -401,3 +404,29 @@ def equalize_clahe(
         eq_imgs = eq_imgs.squeeze(0)
 
     return eq_imgs
+
+
+def _batch_histc(tiles: torch.Tensor, bins: int) -> torch.Tensor:
+    # Compute histograms for all tiles in a batch, avoiding Python loop and maximizing GPU/CPU parallelism.
+    """Args:
+        tiles: shape (T, N), T tiles each of N pixels in [0, 1].
+        bins: number of histogram bins.
+
+    Returns:
+        Tensor of shape (T, bins): histogram for each tile.
+    """
+    dtype = tiles.dtype
+    # torch.histc does not have a batched version; mimic it efficiently for common dtypes.
+    device = tiles.device
+    T, N = tiles.shape  # T: Number of tiles
+
+    # Bin edges and assign to bins
+    step = (1.0 - 0.0) / bins
+    # Clamp input to [0,1] strictly for robust binning
+    tiles = tiles.clamp(0, 1)
+    idx = torch.clamp((tiles / step).long(), 0, bins - 1)  # shape (T, N)
+    # Construct batched histograms using scatter_add_
+    histos = torch.zeros((T, bins), dtype=tiles.dtype, device=device)
+    # Vectorize scatter_add for better performance
+    histos.scatter_add_(1, idx, torch.ones_like(tiles, dtype=tiles.dtype))
+    return histos
