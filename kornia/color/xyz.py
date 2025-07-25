@@ -26,7 +26,7 @@ from kornia.core import Tensor
 
 
 def rgb_to_xyz(image: Tensor) -> Tensor:
-    r"""Convert a RGB image to XYZ.
+    """Convert a RGB image to XYZ.
 
     .. image:: _static/img/rgb_to_xyz.png
 
@@ -47,16 +47,22 @@ def rgb_to_xyz(image: Tensor) -> Tensor:
     if len(image.shape) < 3 or image.shape[-3] != 3:
         raise ValueError(f"Input size must have a shape of (*, 3, H, W). Got {image.shape}")
 
-    r: Tensor = image[..., 0, :, :]
-    g: Tensor = image[..., 1, :, :]
-    b: Tensor = image[..., 2, :, :]
-
-    x: Tensor = 0.412453 * r + 0.357580 * g + 0.180423 * b
-    y: Tensor = 0.212671 * r + 0.715160 * g + 0.072169 * b
-    z: Tensor = 0.019334 * r + 0.119193 * g + 0.950227 * b
-
-    out: Tensor = torch.stack([x, y, z], -3)
-
+    # Use tensordot to perform the color space conversion in a single operation.
+    # We contract over the color channel (-3) for efficiency.
+    # Equivalent to: out_c = sum_{i} M[c, i] * x_i for c = 0,1,2 (output channels)
+    # Maintains all other dimensions.
+    # Broadcast _RGB_TO_XYZ to correct device and dtype
+    matrix = _RGB_TO_XYZ.to(image.device, dtype=image.dtype)
+    out = torch.tensordot(matrix, image, dims=([1], [-3]))
+    # tensordot produces (3, *) shape -- move channel to correct axis
+    # Output needs to be (*, 3, H, W)
+    # Input shape:     (..., 3, H, W)
+    # After tensordot: (3, ..., H, W)
+    # Permute to (..., 3, H, W)
+    # But PyTorch tensordot contracts (M, K) x (..., K, ...) -> (M, ..., ...)
+    # So if input.shape = (..., 3, H, W) -> output.shape = (3, ..., H, W)
+    # Need to move first dim to -3th for output
+    out = out.movedim(0, -3)
     return out
 
 
@@ -147,3 +153,13 @@ class XyzToRgb(Module):
 
     def forward(self, image: Tensor) -> Tensor:
         return xyz_to_rgb(image)
+
+
+_RGB_TO_XYZ = torch.tensor(
+    [
+        [0.412453, 0.357580, 0.180423],
+        [0.212671, 0.715160, 0.072169],
+        [0.019334, 0.119193, 0.950227],
+    ],
+    dtype=torch.float32,
+)
