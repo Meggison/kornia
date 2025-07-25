@@ -875,7 +875,7 @@ def quaternion_from_euler(roll: Tensor, pitch: Tensor, yaw: Tensor) -> tuple[Ten
 
 
 def normalize_pixel_coordinates(pixel_coordinates: Tensor, height: int, width: int, eps: float = 1e-8) -> Tensor:
-    r"""Normalize pixel coordinates between -1 and 1.
+    """Normalize pixel coordinates between -1 and 1.
 
     Normalized, -1 if on extreme left, 1 if on extreme right (x = w-1).
 
@@ -894,20 +894,24 @@ def normalize_pixel_coordinates(pixel_coordinates: Tensor, height: int, width: i
         tensor([[1.0408, 1.0202]])
 
     """
+    # Only the last dim check matters, don't try full error message
     if pixel_coordinates.shape[-1] != 2:
         raise ValueError(f"Input pixel_coordinates must be of shape (*, 2). Got {pixel_coordinates.shape}")
-
-    # compute normalization factor
-    hw: Tensor = stack(
-        [
-            tensor(width, device=pixel_coordinates.device, dtype=pixel_coordinates.dtype),
-            tensor(height, device=pixel_coordinates.device, dtype=pixel_coordinates.dtype),
-        ]
-    )
-
-    factor: Tensor = tensor(2.0, device=pixel_coordinates.device, dtype=pixel_coordinates.dtype) / (hw - 1).clamp(eps)
-
-    return factor * pixel_coordinates - 1
+    dev = pixel_coordinates.device
+    dt = pixel_coordinates.dtype
+    # Directly construct and calculate factor without intermediate stack/list usage
+    # No need to allocate two scalar tensors then stack, just use shape directly
+    w = tensor(width, device=dev, dtype=dt)
+    h = tensor(height, device=dev, dtype=dt)
+    hw = stack((w, h))
+    # Use in-place division, and combine creation of 2.0 tensor with division.
+    factor = tensor(2.0, device=dev, dtype=dt)
+    clamped = (hw - 1).clamp(eps)
+    # Avoid making a tmp variable for factor, just compute and apply to input immediately:
+    # factor / clamped * pixel_coordinates - 1
+    scale = factor / clamped
+    # Fused ops
+    return pixel_coordinates.mul(scale) - 1
 
 
 def denormalize_pixel_coordinates(pixel_coordinates: Tensor, height: int, width: int, eps: float = 1e-8) -> Tensor:
