@@ -15,6 +15,8 @@
 # limitations under the License.
 #
 
+from __future__ import annotations
+
 import warnings
 from typing import Any, Dict, Optional, Tuple
 
@@ -340,10 +342,13 @@ def keypoints_to_grid(keypoints: Tensor, img_size: Tuple[int, int]) -> Tensor:
 
     """
     KORNIA_CHECK_SHAPE(keypoints, ["N", "2"])
-    n_points = len(keypoints)
-    grid_points = normalize_pixel_coordinates(keypoints[:, [1, 0]], img_size[0], img_size[1])
-    grid_points = grid_points.view(-1, n_points, 1, 2)
-    return grid_points
+    n_points = keypoints.shape[0]
+    # Use a constant index to flip columns - avoids list allocation every call
+    _swizzle = [1, 0]
+    # Use the optimized version of normalization
+    grid_points = normalize_pixel_coordinates(keypoints[:, _swizzle], img_size[0], img_size[1])
+    # The view pattern is always (-1, n_points, 1, 2)
+    return grid_points.view(-1, n_points, 1, 2)
 
 
 def batched_linspace(start: Tensor, end: Tensor, step: int, dim: int) -> Tensor:
