@@ -73,14 +73,20 @@ class Unet(Module):
                 "Please pad if necessary."
             )
 
-        features = [inp]
-        for layer in self.path_down:
-            features.append(layer(features[-1]))
+        # Preallocate features list with known size (down path length + 1)
+        path_down = self.path_down
+        n_down = len(path_down)
+        features = [None] * (n_down + 1)
+        features[0] = inp
+        for i, layer in enumerate(path_down):
+            features[i + 1] = layer(features[i])
 
         f_bot = features[-1]
-        features_horizontal = features[-2::-1]
-
-        for layer, f_hor in zip(self.path_up, features_horizontal):
+        path_up = self.path_up
+        n_up = len(path_up)
+        # Instead of forming a reversed list, compute index directly
+        for i, layer in enumerate(path_up):
+            f_hor = features[n_down - 1 - i]
             f_bot = layer(f_bot, f_hor)
 
         return f_bot
