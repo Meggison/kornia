@@ -272,9 +272,9 @@ class Detector_config(TypedDict):
 
 def get_default_detector_config() -> Detector_config:
     """Return default config."""
-    # Return a shallow copy to prevent accidental mutation of static dict
+    # Return a shallow copy to ensure modifications outside don't affect the module-level config.
     return _DEFAULT_DETECTOR_CONFIG.copy()
-
+  
 
 class MultiResolutionDetector(Module):
     """Multi-scale feature detector, based on code from KeyNet. Can be used with any response function.
@@ -433,12 +433,13 @@ class MultiResolutionDetector(Module):
         return lafs, responses
 
 
-_DEFAULT_SCALE_FACTOR_LEVELS = math.sqrt(2)
+ _DEFAULT_SCALE_FACTOR_LEVELS = math.sqrt(2)
 
 _DEFAULT_DETECTOR_CONFIG = {
+    # Extraction Parameters
     "nms_size": 15,
     "pyramid_levels": 4,
     "up_levels": 1,
-    "scale_factor_levels": _DEFAULT_SCALE_FACTOR_LEVELS,
+    "scale_factor_levels": math.sqrt(2),
     "s_mult": 22.0,
 }
