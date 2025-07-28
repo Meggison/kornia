@@ -193,12 +193,26 @@ def sift_describe(
     rootsift: bool = True,
     clipval: float = 0.2,
 ) -> Tensor:
-    r"""Compute the sift descriptor.
+    """Compute the sift descriptor.
 
     See
     :class: `~kornia.feature.SIFTDescriptor` for details.
     """
-    return SIFTDescriptor(patch_size, num_ang_bins, num_spatial_bins, rootsift, clipval)(input)
+    return _get_sift_descriptor(patch_size, num_ang_bins, num_spatial_bins, rootsift, clipval)(input)
+
+
+def _get_sift_descriptor(
+    patch_size: int,
+    num_ang_bins: int,
+    num_spatial_bins: int,
+    rootsift: bool,
+    clipval: float,
+):
+    key = (patch_size, num_ang_bins, num_spatial_bins, rootsift, clipval)
+    cache = _SIFT_DESCRIPTOR_CACHE
+    if key not in cache:
+        cache[key] = SIFTDescriptor(*key)
+    return cache[key]
 
 
 class DenseSIFTDescriptor(Module):
@@ -319,3 +333,6 @@ class DenseSIFTDescriptor(Module):
         if self.rootsift:
             out = torch.sqrt(normalize(out, p=1) + self.eps)
         return out
+
+
+_SIFT_DESCRIPTOR_CACHE = {}
