@@ -35,7 +35,7 @@ def _get_reshape_kernel(kd: int, ky: int, kx: int) -> Tensor:
 
 
 def get_sift_pooling_kernel(ksize: int = 25) -> Tensor:
-    r"""Return a weighted pooling kernel for SIFT descriptor.
+    """Return a weighted pooling kernel for SIFT descriptor.
 
     Args:
         ksize: kernel_size.
@@ -44,9 +44,15 @@ def get_sift_pooling_kernel(ksize: int = 25) -> Tensor:
         the pooling kernel with shape :math:`(ksize, ksize)`.
 
     """
-    ks_2: float = float(ksize) / 2.0
-    xc2 = ks_2 - (torch.arange(ksize).float() + 0.5 - ks_2).abs()
-    kernel = torch.ger(xc2, xc2) / (ks_2**2)
+    # Compute range only once, avoid repeated float conversions and boxing
+    # Use vectorized computation for better speed
+    ks_2 = (ksize) / 2.0
+    ar = torch.arange(ksize, dtype=torch.float32)
+    xc2 = ks_2 - torch.abs(ar + 0.5 - ks_2)  # avoid two ops by merging
+    # Use torch.outer instead of ger for newer semantics (same for 1D).
+    # Division factor is a scalar, type is always float.
+    kernel = torch.outer(xc2, xc2)
+    kernel.div_(ks_2**2)  # Inplace to save memory
     return kernel
 
 
