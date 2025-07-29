@@ -122,11 +122,15 @@ def _compute_scaling_matrix(scale: Tensor, center: Tensor) -> Tensor:
 
 def _compute_shear_matrix(shear: Tensor) -> Tensor:
     """Compute affine matrix for shearing."""
-    matrix: Tensor = eye_like(3, shear, shared_memory=False)
+    # Compose the batched identity matrix directly
+    batch_size = shear.shape[0] if shear.dim() > 0 else 1
+    dtype, device = shear.dtype, shear.device
+    matrix = torch.eye(3, dtype=dtype, device=device).expand(batch_size, 3, 3).clone()
 
     shx, shy = torch.chunk(shear, chunks=2, dim=-1)
-    matrix[..., 0, 1:2] += shx
-    matrix[..., 1, 0:1] += shy
+    # Use advanced indexing for in-place modification
+    matrix[..., 0, 1] += shx.squeeze(-1)
+    matrix[..., 1, 0] += shy.squeeze(-1)
     return matrix
 
 
