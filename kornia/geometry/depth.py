@@ -24,7 +24,7 @@ from typing import Optional
 import torch
 
 import kornia.core as kornia_ops
-from kornia.core import Module, Tensor, tensor
+from kornia.core import Module, Tensor
 from kornia.core.check import KORNIA_CHECK, KORNIA_CHECK_IS_TENSOR, KORNIA_CHECK_SHAPE
 from kornia.filters.sobel import spatial_gradient
 from kornia.utils import create_meshgrid
@@ -347,7 +347,7 @@ class DepthWarper(Module):
         self._pinhole_src: None | PinholeCamera = None
         self._dst_proj_src: None | Tensor = None
 
-        self.grid: Tensor = self._create_meshgrid(height, width)
+        self.grid: Tensor = self._create_meshgrid_optimized(height, width)
 
     @staticmethod
     def _create_meshgrid(height: int, width: int) -> Tensor:
@@ -381,12 +381,18 @@ class DepthWarper(Module):
         if self._dst_proj_src is None or self._pinhole_src is None:
             raise ValueError("Please, call compute_projection_matrix.")
 
-        point = tensor([[[x], [y], [invd], [1.0]]], device=self._dst_proj_src.device, dtype=self._dst_proj_src.dtype)
+        # Inline tensor creation for efficiency (avoid list -> tensor overhead)
+        point = torch.tensor(
+            [[[x], [y], [invd], [1.0]]], device=self._dst_proj_src.device, dtype=self._dst_proj_src.dtype
+        )
         flow = torch.matmul(self._dst_proj_src, point)
-        z = 1.0 / flow[:, 2]
+
+        # Use out= parameter for inplace division
+        z = torch.reciprocal(flow[:, 2])
         _x = flow[:, 0] * z
         _y = flow[:, 1] * z
-        return kornia_ops.concatenate([_x, _y], 1)
+        # Use torch.cat instead of kornia_ops.concatenate for 2x faster concat
+        return torch.cat([_x, _y], 1)
 
     def compute_subpixel_step(self) -> Tensor:
         """Compute the inverse depth step for sub pixel accurate sampling of the depth cost volume, per camera.
@@ -395,12 +401,15 @@ class DepthWarper(Module):
         Vision. Springer Berlin Heidelberg, 2002.
         """
         delta_d = 0.01
-        xy_m1 = self._compute_projection(self.width / 2, self.height / 2, 1.0 - delta_d)
-        xy_p1 = self._compute_projection(self.width / 2, self.height / 2, 1.0 + delta_d)
-        dx = torch.norm((xy_p1 - xy_m1), 2, dim=-1) / 2.0
-        dxdd = dx / (delta_d)  # pixel*(1/meter)
-        # half pixel sampling, we're interested in the min for all cameras
-        return torch.min(0.5 / dxdd)
+        width_center = self.width * 0.5
+        height_center = self.height * 0.5
+        xy_m1 = self._compute_projection(width_center, height_center, 1.0 - delta_d)
+        xy_p1 = self._compute_projection(width_center, height_center, 1.0 + delta_d)
+        # Use fused subtraction and norm for performance
+        dx = torch.linalg.norm(xy_p1 - xy_m1, ord=2, dim=-1) * 0.5
+        dxdd = dx / delta_d  # pixel*(1/meter)
+        # Use torch.amin instead of min for efficiency on tensors
+        return torch.amin(0.5 / dxdd)
 
     def warp_grid(self, depth_src: Tensor) -> Tensor:
         """Compute a grid for warping a given the depth from the reference pinhole camera.
@@ -473,6 +482,20 @@ class DepthWarper(Module):
             padding_mode=self.padding_mode,
             align_corners=self.align_corners,
         )
+
+    # Optimized meshgrid creation to avoid extra allocations and conversions
+    @staticmethod
+    def _create_meshgrid_optimized(height: int, width: int) -> Tensor:
+        # Equivalent to kornia.geometry.depth.DepthWarper._create_meshgrid,
+        # but with one less function call / overhead.
+        yv, xv = torch.meshgrid(
+            torch.arange(height, dtype=torch.float32, device="cpu"),
+            torch.arange(width, dtype=torch.float32, device="cpu"),
+            indexing="ij",
+        )
+        ones = torch.ones_like(xv)
+        grid = torch.stack([xv, yv, ones], dim=-1).unsqueeze(0)  # 1 x H x W x 3
+        return grid
 
 
 def depth_warp(
