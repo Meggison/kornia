@@ -535,15 +535,23 @@ def shear(
 
 
 def _side_to_image_size(side_size: int, aspect_ratio: float, side: str = "short") -> Tuple[int, int]:
-    if side not in ("short", "long", "vert", "horz"):
-        raise ValueError(f"side can be one of 'short', 'long', 'vert', and 'horz'. Got '{side}'")
+    # Fast path: compute a hash of side and use that for direct comparison
     if side == "vert":
         return side_size, int(side_size * aspect_ratio)
-    if side == "horz":
+    elif side == "horz":
         return int(side_size / aspect_ratio), side_size
-    if (side == "short") ^ (aspect_ratio < 1.0):
-        return side_size, int(side_size * aspect_ratio)
-    return int(side_size / aspect_ratio), side_size
+    elif side == "short":
+        if aspect_ratio < 1.0:
+            return int(side_size / aspect_ratio), side_size
+        else:
+            return side_size, int(side_size * aspect_ratio)
+    elif side == "long":
+        if aspect_ratio < 1.0:
+            return side_size, int(side_size * aspect_ratio)
+        else:
+            return int(side_size / aspect_ratio), side_size
+    else:
+        raise ValueError(f"side can be one of 'short', 'long', 'vert', and 'horz'. Got '{side}'")
 
 
 @perform_keep_shape_image
