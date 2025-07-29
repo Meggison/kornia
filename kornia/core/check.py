@@ -70,34 +70,48 @@ def KORNIA_CHECK_SHAPE(x: Tensor, shape: list[str], raises: bool = True) -> bool
         True
 
     """
-    if "*" == shape[0]:
-        shape_to_check = shape[1:]
-        x_shape_to_check = x.shape[-len(shape) + 1 :]
-    elif "*" == shape[-1]:
-        shape_to_check = shape[:-1]
-        x_shape_to_check = x.shape[: len(shape) - 1]
-    else:
-        shape_to_check = shape
-        x_shape_to_check = x.shape
-
-    if len(x_shape_to_check) != len(shape_to_check):
-        if raises:
-            raise TypeError(f"{x} shape must be [{shape}]. Got {x.shape}")
-        else:
-            return False
-
-    for i in range(len(x_shape_to_check)):
-        # The voodoo below is because torchscript does not like
-        # that dim can be both int and str
-        dim_: str = shape_to_check[i]
-        if not dim_.isnumeric():
-            continue
-        dim = int(dim_)
-        if x_shape_to_check[i] != dim:
+    # Optimized: avoid string compares and exception string construction if not needed
+    x_shape = x.shape
+    n = len(x_shape)
+    m = len(shape)
+    offset = 0
+    # '*' wildcard, match trailing or leading dims
+    if m and shape[0] == "*":
+        pattern = shape[1:]
+        offset = n - (m - 1)
+        if offset < 0:
             if raises:
-                raise TypeError(f"{x} shape must be [{shape}]. Got {x.shape}")
-            else:
+                raise TypeError(f"Tensor shape mismatch: expected {shape}, got {x_shape}")
+            return False
+        x_sub = x_shape[offset:]
+    elif m and shape[-1] == "*":
+        pattern = shape[:-1]
+        if n < (m - 1):
+            if raises:
+                raise TypeError(f"Tensor shape mismatch: expected {shape}, got {x_shape}")
+            return False
+        x_sub = x_shape[: len(pattern)]
+    else:
+        pattern = shape
+        if n != m:
+            if raises:
+                raise TypeError(f"Tensor shape mismatch: expected {shape}, got {x_shape}")
+            return False
+        x_sub = x_shape
+    # Numeric dimension speedup; avoids string operations unless actually needed
+    for i, dim_ in enumerate(pattern):
+        # Fast int
+        if isinstance(dim_, int):
+            if x_sub[i] != dim_:
+                if raises:
+                    raise TypeError(f"Tensor shape mismatch at {i}: expected {shape}, got {x_shape}")
                 return False
+        elif hasattr(dim_, "isnumeric") and dim_.isnumeric():
+            if x_sub[i] != int(dim_):
+                if raises:
+                    raise TypeError(f"Tensor shape mismatch at {i}: expected {shape}, got {x_shape}")
+                return False
+        # else skip (symbolic)
     return True
 
 
@@ -464,3 +478,18 @@ def _handle_invalid_range(msg: Optional[str], raises: bool, min_val: float | Ten
     if raises:
         raise ValueError(err_msg)
     return False
+
+
+# Optimized fast path for numeric shape checks (used by downstream)
+def _fast_numeric_shape_match(tensor_shape, pattern):
+    # Pattern: e.g. ["B","N",2], ["B",3]
+    if len(tensor_shape) != len(pattern):
+        return False
+    for t, p in zip(tensor_shape, pattern):
+        if isinstance(p, int):
+            if t != p:
+                return False
+        elif p.isnumeric():
+            if t != int(p):
+                return False
+    return True

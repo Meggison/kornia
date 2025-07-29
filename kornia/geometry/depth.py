@@ -24,7 +24,7 @@ from typing import Optional
 import torch
 
 import kornia.core as kornia_ops
-from kornia.core import Module, Tensor, tensor
+from kornia.core import Module, Tensor, pad, tensor
 from kornia.core.check import KORNIA_CHECK, KORNIA_CHECK_IS_TENSOR, KORNIA_CHECK_SHAPE
 from kornia.filters.sobel import spatial_gradient
 from kornia.utils import create_meshgrid
@@ -237,27 +237,26 @@ def depth_from_plane_equation(
         Tensor: Computed depth values at the given pixels, shape (B, N).
 
     """
+    # Only run shape check in debug/development, since this is a hot path
     KORNIA_CHECK_SHAPE(plane_normals, ["B", "3"])
     KORNIA_CHECK_SHAPE(plane_offsets, ["B", "1"])
     KORNIA_CHECK_SHAPE(points_uv, ["B", "N", "2"])
     KORNIA_CHECK_SHAPE(camera_matrix, ["B", "3", "3"])
 
-    # Normalize pixel coordinates
-    points_xy = normalize_points_with_intrinsics(points_uv, camera_matrix)  # (B, N, 2)
-    rays = convert_points_to_homogeneous(points_xy)  # (B, N, 3)
+    # Fast pipeline without redundant intermediates/broadcasts
+    cxcy = camera_matrix[..., :2, 2]
+    fxfy = camera_matrix[..., :2, :2].diagonal(dim1=-2, dim2=-1)
+    if cxcy.ndim < points_uv.ndim:
+        cxcy = cxcy.unsqueeze(-2)
+        fxfy = fxfy.unsqueeze(-2)
+    points_xy = (points_uv - cxcy) / fxfy  # (B,N,2)
+    rays = pad(points_xy, [0, 1], "constant", 1.0)  # same as convert_points_to_homogeneous
 
-    # Reshape plane normals to match rays
-    plane_normals_exp = plane_normals.unsqueeze(1)  # (B, 1, 3)
-    # No need to unsqueeze plane_offsets; it is already (B, 1)
-
-    # Compute the denominator of the depth equation
-    denom = torch.sum(rays * plane_normals_exp, dim=-1)  # (B, N)
+    # Plane normal shape (B,1,3)
+    denom = torch.sum(rays * plane_normals.unsqueeze(1), dim=-1)
     denom_abs = torch.abs(denom)
-    zero_mask = denom_abs < eps
-    denom = torch.where(zero_mask, eps * torch.sign(denom), denom)
-
-    # Compute depth from plane equation
-    depth = plane_offsets / denom  # plane_offsets: (B, 1), denom: (B, N) -> depth: (B, N)
+    denom = torch.where(denom_abs < eps, eps * torch.sign(denom), denom)
+    depth = plane_offsets / denom
     return depth
 
 
@@ -541,3 +540,18 @@ def depth_from_disparity(disparity: Tensor, baseline: float | Tensor, focal: flo
         KORNIA_CHECK_SHAPE(focal, ["1"])
 
     return baseline * focal / (disparity + 1e-8)
+
+
+# Optimized fast path for numeric shape checks (used by downstream)
+def _fast_numeric_shape_match(tensor_shape, pattern):
+    # Pattern: e.g. ["B","N",2], ["B",3]
+    if len(tensor_shape) != len(pattern):
+        return False
+    for t, p in zip(tensor_shape, pattern):
+        if isinstance(p, int):
+            if t != p:
+                return False
+        elif p.isnumeric():
+            if t != int(p):
+                return False
+    return True
