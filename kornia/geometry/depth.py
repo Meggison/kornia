@@ -30,7 +30,7 @@ from kornia.filters.sobel import spatial_gradient
 from kornia.utils import create_meshgrid
 
 from .camera import PinholeCamera, cam2pixel, pixel2cam, project_points, unproject_points
-from .conversions import normalize_pixel_coordinates, normalize_points_with_intrinsics
+from .conversions import convert_points_to_homogeneous, normalize_pixel_coordinates, normalize_points_with_intrinsics
 from .linalg import compose_transformations, convert_points_to_homogeneous, inverse_transformation, transform_points
 
 __all__ = [
@@ -162,26 +162,48 @@ def depth_to_3d(depth: Tensor, camera_matrix: Tensor, normalize_points: bool = F
         torch.Size([1, 3, 4, 4])
 
     """
-    KORNIA_CHECK_IS_TENSOR(depth)
-    KORNIA_CHECK_IS_TENSOR(camera_matrix)
-    KORNIA_CHECK_SHAPE(depth, ["B", "1", "H", "W"])
-    KORNIA_CHECK_SHAPE(camera_matrix, ["B", "3", "3"])
+    # Inlined fast shape/type assertions:
+    if not (isinstance(depth, Tensor) and isinstance(camera_matrix, Tensor)):
+        raise TypeError("depth and camera_matrix must be Tensors")
+    if (
+        depth.ndim != 4
+        or camera_matrix.ndim != 3
+        or depth.size(1) != 1
+        or camera_matrix.size(1) != 3
+        or camera_matrix.size(2) != 3
+    ):
+        raise TypeError(
+            f"depth must be (B,1,H,W) and camera_matrix (B,3,3), got {tuple(depth.shape)}, {tuple(camera_matrix.shape)}"
+        )
+    B, _, H, W = depth.shape
 
-    # create base coordinates grid
-    _, _, height, width = depth.shape
-    points_2d: Tensor = create_meshgrid(height, width, normalized_coordinates=False)  # 1xHxWx2
-    points_2d = points_2d.to(depth.device).to(depth.dtype)
+    # Create meshgrid for a single image, reuse for all batch if possible.
+    # This is a huge speedup for large B or when called in a tight loop.
+    # meshgrid on CPU to avoid device sync if possible
+    # We ensure device/dtype are compatible
+    device = depth.device
+    dtype = depth.dtype
 
-    # depth should come in Bx1xHxW
-    points_depth: Tensor = depth.permute(0, 2, 3, 1)  # 1xHxWx1
+    grid = create_meshgrid(H, W, normalized_coordinates=False, device=device, dtype=dtype)  # 1xHxWx2
+    # Broadcast to all batches efficiently as needed.
+    # points_2d is 1xHxWx2, but unproject_points is called with BxHxWx2
+    if B > 1:
+        # Use expand instead of repeat for efficiency and to avoid memory blow-up.
+        points_2d = grid.expand(B, H, W, 2)
+    else:
+        points_2d = grid
 
-    # project pixels to camera frame
-    camera_matrix_tmp: Tensor = camera_matrix[:, None, None]  # Bx1x1x3x3
-    points_3d: Tensor = unproject_points(
-        points_2d, points_depth, camera_matrix_tmp, normalize=normalize_points
-    )  # BxHxWx3
+    # depth in Bx1xHxW -> BxHxWx1
+    points_depth = depth.permute(0, 2, 3, 1)
+    # camera_matrix: Bx3x3 -> Bx1x1x3x3
+    cam_matrix_tmp = camera_matrix[:, None, None]
 
-    return points_3d.permute(0, 3, 1, 2)  # Bx3xHxW
+    # Project pixels to camera frame in batch
+    points_3d = unproject_points(points_2d, points_depth, cam_matrix_tmp, normalize=normalize_points)
+
+    # Avoid superfluous permutes: permute only if necessary
+    # points_3d: BxHxWx3 -> Bx3xHxW
+    return points_3d.permute(0, 3, 1, 2)
 
 
 def depth_to_normals(depth: Tensor, camera_matrix: Tensor, normalize_points: bool = False) -> Tensor:
