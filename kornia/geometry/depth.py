@@ -31,7 +31,7 @@ from kornia.utils import create_meshgrid
 
 from .camera import PinholeCamera, cam2pixel, pixel2cam, project_points, unproject_points
 from .conversions import normalize_pixel_coordinates, normalize_points_with_intrinsics
-from .linalg import compose_transformations, convert_points_to_homogeneous, inverse_transformation, transform_points
+from .linalg import convert_points_to_homogeneous, transform_points
 
 __all__ = [
     "DepthWarper",
@@ -355,24 +355,20 @@ class DepthWarper(Module):
         return convert_points_to_homogeneous(grid)  # append ones to last dim
 
     def compute_projection_matrix(self, pinhole_src: PinholeCamera) -> DepthWarper:
-        r"""Compute the projection matrix from the source to destination frame."""
+        """Compute the projection matrix from the source to destination frame."""
         if not isinstance(self._pinhole_dst, PinholeCamera):
             raise TypeError(
                 f"Member self._pinhole_dst expected to be of class PinholeCamera. Got {type(self._pinhole_dst)}"
             )
         if not isinstance(pinhole_src, PinholeCamera):
             raise TypeError(f"Argument pinhole_src expected to be of class PinholeCamera. Got {type(pinhole_src)}")
-        # compute the relative pose between the non reference and the reference
-        # camera frames.
-        dst_trans_src: Tensor = compose_transformations(
-            self._pinhole_dst.extrinsics, inverse_transformation(pinhole_src.extrinsics)
+        # use faster local transformations, already checked types, so use direct calls for improved speed
+        dst_trans_src: Tensor = _compose_transformations_fast(
+            self._pinhole_dst.extrinsics, _inverse_transformation_fast(pinhole_src.extrinsics)
         )
 
-        # compute the projection matrix between the non reference cameras and
-        # the reference.
         dst_proj_src: Tensor = torch.matmul(self._pinhole_dst.intrinsics, dst_trans_src)
 
-        # update class members
         self._pinhole_src = pinhole_src
         self._dst_proj_src = dst_proj_src
         return self
@@ -541,3 +537,34 @@ def depth_from_disparity(disparity: Tensor, baseline: float | Tensor, focal: flo
         KORNIA_CHECK_SHAPE(focal, ["1"])
 
     return baseline * focal / (disparity + 1e-8)
+
+
+@torch.jit.script
+def _compose_transformations_fast(trans_01: Tensor, trans_12: Tensor) -> Tensor:
+    # Efficient in-place composition of two homogeneous transformations.
+    rmat_01 = trans_01[..., :3, :3]
+    rmat_12 = trans_12[..., :3, :3]
+    tvec_01 = trans_01[..., :3, 3:4]
+    tvec_12 = trans_12[..., :3, 3:4]
+    rmat_02 = torch.matmul(rmat_01, rmat_12)
+    tvec_02 = torch.matmul(rmat_01, tvec_12) + tvec_01
+    # Directly construct output for best performance:
+    trans_02 = torch.zeros_like(trans_01)
+    trans_02[..., :3, :3] = rmat_02
+    trans_02[..., :3, 3:4] = tvec_02
+    trans_02[..., 3, 3] = 1.0
+    return trans_02
+
+
+@torch.jit.script
+def _inverse_transformation_fast(trans_12: Tensor) -> Tensor:
+    # Efficient in-place inverse of a 4x4 homogeneous transformation.
+    rmat_12 = trans_12[..., :3, :3]
+    tvec_12 = trans_12[..., :3, 3:4]
+    rmat_21 = torch.transpose(rmat_12, -1, -2)
+    tvec_21 = torch.matmul(-rmat_21, tvec_12)
+    trans_21 = torch.zeros_like(trans_12)
+    trans_21[..., :3, :3] = rmat_21
+    trans_21[..., :3, 3:4] = tvec_21
+    trans_21[..., 3, 3] = 1.0
+    return trans_21

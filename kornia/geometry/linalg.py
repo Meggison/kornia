@@ -285,6 +285,37 @@ def euclidean_distance(x: Tensor, y: Tensor, keepdim: bool = False, eps: float =
     return (x - y + eps).pow(2).sum(-1, keepdim).sqrt()
 
 
+@torch.jit.script
+def _compose_transformations_fast(trans_01: Tensor, trans_12: Tensor) -> Tensor:
+    # Efficient in-place composition of two homogeneous transformations.
+    rmat_01 = trans_01[..., :3, :3]
+    rmat_12 = trans_12[..., :3, :3]
+    tvec_01 = trans_01[..., :3, 3:4]
+    tvec_12 = trans_12[..., :3, 3:4]
+    rmat_02 = torch.matmul(rmat_01, rmat_12)
+    tvec_02 = torch.matmul(rmat_01, tvec_12) + tvec_01
+    # Directly construct output for best performance:
+    trans_02 = torch.zeros_like(trans_01)
+    trans_02[..., :3, :3] = rmat_02
+    trans_02[..., :3, 3:4] = tvec_02
+    trans_02[..., 3, 3] = 1.0
+    return trans_02
+
+
+@torch.jit.script
+def _inverse_transformation_fast(trans_12: Tensor) -> Tensor:
+    # Efficient in-place inverse of a 4x4 homogeneous transformation.
+    rmat_12 = trans_12[..., :3, :3]
+    tvec_12 = trans_12[..., :3, 3:4]
+    rmat_21 = torch.transpose(rmat_12, -1, -2)
+    tvec_21 = torch.matmul(-rmat_21, tvec_12)
+    trans_21 = torch.zeros_like(trans_12)
+    trans_21[..., :3, :3] = rmat_21
+    trans_21[..., :3, 3:4] = tvec_21
+    trans_21[..., 3, 3] = 1.0
+    return trans_21
+
+
 # aliases
 squared_norm = batched_squared_norm
 
