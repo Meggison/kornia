@@ -875,7 +875,7 @@ def quaternion_from_euler(roll: Tensor, pitch: Tensor, yaw: Tensor) -> tuple[Ten
 
 
 def normalize_pixel_coordinates(pixel_coordinates: Tensor, height: int, width: int, eps: float = 1e-8) -> Tensor:
-    r"""Normalize pixel coordinates between -1 and 1.
+    """Normalize pixel coordinates between -1 and 1.
 
     Normalized, -1 if on extreme left, 1 if on extreme right (x = w-1).
 
@@ -897,15 +897,12 @@ def normalize_pixel_coordinates(pixel_coordinates: Tensor, height: int, width: i
     if pixel_coordinates.shape[-1] != 2:
         raise ValueError(f"Input pixel_coordinates must be of shape (*, 2). Got {pixel_coordinates.shape}")
 
-    # compute normalization factor
-    hw: Tensor = stack(
-        [
-            tensor(width, device=pixel_coordinates.device, dtype=pixel_coordinates.dtype),
-            tensor(height, device=pixel_coordinates.device, dtype=pixel_coordinates.dtype),
-        ]
+    # Directly compute and reuse shape and device
+    w = tensor(width, device=pixel_coordinates.device, dtype=pixel_coordinates.dtype)
+    h = tensor(height, device=pixel_coordinates.device, dtype=pixel_coordinates.dtype)
+    factor = tensor(2.0, device=pixel_coordinates.device, dtype=pixel_coordinates.dtype) / (stack([w, h]) - 1).clamp(
+        eps
     )
-
-    factor: Tensor = tensor(2.0, device=pixel_coordinates.device, dtype=pixel_coordinates.dtype) / (hw - 1).clamp(eps)
 
     return factor * pixel_coordinates - 1
 
