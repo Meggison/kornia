@@ -106,10 +106,8 @@ def _compute_rotation_matrix3d(yaw: Tensor, pitch: Tensor, roll: Tensor, center:
 def _compute_translation_matrix(translation: Tensor) -> Tensor:
     """Compute affine matrix for translation."""
     matrix: Tensor = eye_like(3, translation, shared_memory=False)
-
-    dx, dy = torch.chunk(translation, chunks=2, dim=-1)
-    matrix[..., 0, 2:3] += dx
-    matrix[..., 1, 2:3] += dy
+    # translation shape (..., 2)
+    matrix[..., :2, 2] += translation
     return matrix
 
 
