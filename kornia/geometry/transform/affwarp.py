@@ -122,11 +122,22 @@ def _compute_scaling_matrix(scale: Tensor, center: Tensor) -> Tensor:
 
 def _compute_shear_matrix(shear: Tensor) -> Tensor:
     """Compute affine matrix for shearing."""
-    matrix: Tensor = eye_like(3, shear, shared_memory=False)
+    # shear shape: (B, 2) or (N, 2)
+    batch_shape = shear.shape[:-1]
+    device = shear.device
+    dtype = shear.dtype
+
+    # Allocate batch identity efficiently:
+    # Use torch.eye for shape (..., 3, 3). Only allocate once and expand.
+    eye3 = torch.eye(3, device=device, dtype=dtype)
+    if batch_shape:
+        matrix = eye3.expand(*batch_shape, 3, 3).clone()
+    else:
+        matrix = eye3.clone()
 
     shx, shy = torch.chunk(shear, chunks=2, dim=-1)
-    matrix[..., 0, 1:2] += shx
-    matrix[..., 1, 0:1] += shy
+    matrix[..., 0, 1] += shx.squeeze(-1)
+    matrix[..., 1, 0] += shy.squeeze(-1)
     return matrix
 
 
@@ -141,7 +152,7 @@ def affine(
     padding_mode: str = "zeros",
     align_corners: bool = True,
 ) -> Tensor:
-    r"""Apply an affine transformation to the image.
+    """Apply an affine transformation to the image.
 
     .. image:: _static/img/warp_affine.png
 
@@ -166,23 +177,18 @@ def affine(
 
     """
     # warping needs data in the shape of BCHW
+    shape = tensor.shape
     is_unbatched: bool = tensor.ndimension() == 3
     if is_unbatched:
-        tensor = torch.unsqueeze(tensor, dim=0)
+        tensor = tensor.unsqueeze(0)
+    # Fast check for matrix shape
+    if matrix.shape[0] != tensor.shape[0]:
+        matrix = matrix.expand(tensor.shape[0], -1, -1)
+    B, C, H, W = tensor.shape
 
-    # we enforce broadcasting since by default grid_sample it does not
-    # give support for that
-    matrix = matrix.expand(tensor.shape[0], -1, -1)
-
-    # warp the input tensor
-    height: int = tensor.shape[-2]
-    width: int = tensor.shape[-1]
-    warped: Tensor = warp_affine(tensor, matrix, (height, width), mode, padding_mode, align_corners)
-
-    # return in the original shape
+    warped: Tensor = warp_affine(tensor, matrix, (H, W), mode, padding_mode, align_corners)
     if is_unbatched:
-        warped = torch.squeeze(warped, dim=0)
-
+        warped = warped.squeeze(0)
     return warped
 
 
@@ -492,7 +498,7 @@ def shear(
     padding_mode: str = "zeros",
     align_corners: bool = False,
 ) -> Tensor:
-    r"""Shear the tensor.
+    """Shear the tensor.
 
     .. image:: _static/img/shear.png
 
@@ -527,7 +533,6 @@ def shear(
     if len(tensor.shape) not in (3, 4):
         raise ValueError(f"Invalid tensor shape, we expect CxHxW or BxCxHxW. Got: {tensor.shape}")
 
-    # compute the translation matrix
     shear_matrix: Tensor = _compute_shear_matrix(shear)
 
     # warp using the affine transform
