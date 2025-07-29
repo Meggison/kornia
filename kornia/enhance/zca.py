@@ -319,24 +319,24 @@ def zca_whiten(inp: Tensor, dim: int = 0, unbiased: bool = True, eps: float = 1e
 
 
 def linear_transform(inp: Tensor, transform_matrix: Tensor, mean_vector: Tensor, dim: int = 0) -> Tensor:
-    r"""Given a transformation matrix and a mean vector, this function will flatten the input tensor along the given
+    """Given a transformation matrix and a mean vector, this function will flatten the input tensor along the given
     dimension and subtract the mean vector from it. Then the dot product with the transformation matrix will be
     computed and then the resulting tensor is reshaped to the original input shape.
 
     .. math::
 
-        \mathbf{X}_{T} = (\mathbf{X - \mu})(T)
+        \\mathbf{X}_{T} = (\\mathbf{X - \\mu})(T)
 
     Args:
         inp: Input data :math:`X`.
         transform_matrix: Transform matrix :math:`T`.
-        mean_vector: mean vector :math:`\mu`.
+        mean_vector: mean vector :math:`\\mu`.
         dim: Batch dimension.
 
     Shapes:
         - inp: :math:`(D_0,...,D_{\text{dim}},...,D_N)` is a batch of N-D tensors.
-        - transform_matrix: :math:`(\Pi_{d=0,d\neq \text{dim}}^N D_d, \Pi_{d=0,d\neq \text{dim}}^N D_d)`
-        - mean_vector: :math:`(1, \Pi_{d=0,d\neq \text{dim}}^N D_d)`
+        - transform_matrix: :math:`(\\Pi_{d=0,d\neq \text{dim}}^N D_d, \\Pi_{d=0,d\neq \text{dim}}^N D_d)`
+        - mean_vector: :math:`(1, \\Pi_{d=0,d\neq \text{dim}}^N D_d)`
 
     Returns:
         Transformed data.
@@ -358,7 +358,7 @@ def linear_transform(inp: Tensor, transform_matrix: Tensor, mean_vector: Tensor,
         >>> print(out.shape, out.unique()) # Should a be (10,2) tensor of 2s
         torch.Size([10, 2]) tensor([2.])
 
-    """  # noqa: D205
+    """
     inp_size = inp.size()
 
     if dim >= len(inp_size) or dim < -len(inp_size):
@@ -369,25 +369,32 @@ def linear_transform(inp: Tensor, transform_matrix: Tensor, mean_vector: Tensor,
     if dim < 0:
         dim = len(inp_size) + dim
 
-    feat_dims = concatenate([torch.arange(0, dim), torch.arange(dim + 1, len(inp_size))])
+    # Use tuple/list comprehensions and avoid unnecessary conversions to Tensor for speed
+    ndim = len(inp_size)
+    # fast alternative to concatenate([torch.arange(0, dim), torch.arange(dim + 1, len(inp_size))])
+    feat_dims = list(range(0, dim)) + list(range(dim + 1, ndim))
+    perm = [dim] + feat_dims
+    perm_inv = [0] * ndim
+    for i, p in enumerate(perm):
+        perm_inv[p] = i
 
-    perm = concatenate([tensor([dim]), feat_dims])
-    perm_inv = torch.argsort(perm)
+    # Use ints rather than Tensors here for slicing, faster for Python dispatch
+    # feature_sizes = tensor(inp_size[0:dim] + inp_size[dim + 1 : :])
+    # num_features: int = int(torch.prod(feature_sizes).item())
+    # The above is better as:
+    feature_sizes = inp_size[:dim] + inp_size[dim + 1 :]
+    num_features = 1
+    for s in feature_sizes:
+        num_features *= s
 
-    new_order: List[int] = perm.tolist()
-    inv_order: List[int] = perm_inv.tolist()
-
-    feature_sizes = tensor(inp_size[0:dim] + inp_size[dim + 1 : :])
-    num_features: int = int(torch.prod(feature_sizes).item())
-
-    inp_permute = inp.permute(new_order)
+    inp_permute = inp.permute(perm)
     inp_flat = inp_permute.reshape((-1, num_features))
 
     inp_center = inp_flat - mean_vector
     inp_transformed = inp_center.mm(transform_matrix)
-
     inp_transformed = inp_transformed.reshape(inp_permute.size())
 
-    inp_transformed = inp_transformed.permute(inv_order)
+    # Instead of expensive permute using a Tensor, use tuple/list
+    inp_transformed = inp_transformed.permute(perm_inv)
 
     return inp_transformed
