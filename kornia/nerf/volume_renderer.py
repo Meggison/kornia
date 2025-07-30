@@ -42,14 +42,22 @@ class VolumeRenderer(torch.nn.Module):
         self._shift = shift
 
     def _render(self, alpha: Tensor, rgbs: Tensor) -> Tensor:
-        trans = torch.cumprod(1 - alpha + self._eps, dim=-2)  # (*, N, 1)
-        trans = torch.roll(trans, shifts=self._shift, dims=-2)  # (*, N, 1)
-        trans[..., : self._shift, :] = 1  # (*, N, 1)
-
-        weights = trans * alpha  # (*, N, 1)
-
-        rgbs_rendered = torch.sum(weights * rgbs, dim=-2)  # (*, 3)
-
+        # Fast alternative to torch.roll + slice set
+        # alpha: (*, N, 1)
+        # rgbs:  (*, N, 3)
+        one_minus_alpha = 1 - alpha + self._eps  # (*, N, 1)
+        # Build 'trans' so that trans[..., :self._shift, :] = 1 and other entries are shifted cumprod
+        trans_shape = list(one_minus_alpha.shape)
+        trans = torch.ones_like(one_minus_alpha)
+        if self._shift < trans_shape[-2]:  # Only bother if shift would not fill everything
+            # Compute all necessary cumulative products upfront (no roll)
+            cprod = torch.cumprod(one_minus_alpha, dim=-2)
+            # trans[..., self._shift:, :] = cprod[..., :-self._shift, :]
+            trans_n = trans_shape[-2]
+            trans[..., self._shift :, :] = cprod[..., : (trans_n - self._shift), :]
+            # No need to fill the first 'shift' rows as ones -- that's already done
+        # weights = trans * alpha
+        rgbs_rendered = torch.sum(trans * alpha * rgbs, dim=-2)  # (*, 3)
         return rgbs_rendered
 
     def forward(self, rgbs: Tensor, densities: Tensor, points_3d: Tensor) -> Tensor:
