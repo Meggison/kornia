@@ -131,15 +131,15 @@ class VideoSequential(ImageSequential):
             random_apply=random_apply,
             random_apply_weights=random_apply_weights,
         )
-        self.same_on_frame = same_on_frame
-        self.data_format = data_format.upper()
-        if self.data_format not in ["BCTHW", "BTCHW"]:
-            raise AssertionError(f"Only `BCTHW` and `BTCHW` are supported. Got `{data_format}`.")
-        self._temporal_channel: int
-        if self.data_format == "BCTHW":
+        df = data_format.upper()
+        if df == "BCTHW":
             self._temporal_channel = 2
-        elif self.data_format == "BTCHW":
+        elif df == "BTCHW":
             self._temporal_channel = 1
+        else:
+            raise AssertionError(f"Only `BCTHW` and `BTCHW` are supported. Got `{data_format}`.")
+        self.same_on_frame = same_on_frame
+        self.data_format = df
 
     def __infer_channel_exclusive_batch_shape__(self, batch_shape: torch.Size, chennel_index: int) -> torch.Size:
         # Fix mypy complains: error: Incompatible return value type (got "Tuple[int, ...]", expected "Size")
@@ -158,15 +158,12 @@ class VideoSequential(ImageSequential):
         return repeated.reshape(-1, *list(param.shape[1:]))
 
     def _input_shape_convert_in(self, input: Tensor, frame_num: int) -> Tensor:
-        # Convert any shape to (B, T, C, H, W)
+        # Convert (B, C, T, H, W) or (B, T, C, H, W) to (B, T, C, H, W).
+        # Only transpose if data_format is 'BCTHW'.
         if self.data_format == "BCTHW":
-            # Convert (B, C, T, H, W) to (B, T, C, H, W)
             input = input.transpose(1, 2)
-        if self.data_format == "BTCHW":
-            pass
-
-        input = input.reshape(-1, *input.shape[2:])
-        return input
+        # Collapse B/T/C axis for flattening:
+        return input.reshape(-1, *input.shape[2:])
 
     def _input_shape_convert_back(self, input: Tensor, frame_num: int) -> Tensor:
         input = input.view(-1, frame_num, *input.shape[1:])
