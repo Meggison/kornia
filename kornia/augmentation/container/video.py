@@ -132,14 +132,14 @@ class VideoSequential(ImageSequential):
             random_apply_weights=random_apply_weights,
         )
         self.same_on_frame = same_on_frame
-        self.data_format = data_format.upper()
-        if self.data_format not in ["BCTHW", "BTCHW"]:
-            raise AssertionError(f"Only `BCTHW` and `BTCHW` are supported. Got `{data_format}`.")
-        self._temporal_channel: int
-        if self.data_format == "BCTHW":
+        df = data_format.upper()
+        if df == "BCTHW":
             self._temporal_channel = 2
-        elif self.data_format == "BTCHW":
+        elif df == "BTCHW":
             self._temporal_channel = 1
+        else:
+            raise AssertionError(f"Only `BCTHW` and `BTCHW` are supported. Got `{data_format}`.")
+        self.data_format = df
 
     def __infer_channel_exclusive_batch_shape__(self, batch_shape: torch.Size, chennel_index: int) -> torch.Size:
         # Fix mypy complains: error: Incompatible return value type (got "Tuple[int, ...]", expected "Size")
@@ -158,23 +158,20 @@ class VideoSequential(ImageSequential):
         return repeated.reshape(-1, *list(param.shape[1:]))
 
     def _input_shape_convert_in(self, input: Tensor, frame_num: int) -> Tensor:
-        # Convert any shape to (B, T, C, H, W)
+        # Convert any shape to (B, T, C, H, W) if needed
         if self.data_format == "BCTHW":
-            # Convert (B, C, T, H, W) to (B, T, C, H, W)
+            # Only transpose if needed; for BTCHW do nothing.
             input = input.transpose(1, 2)
-        if self.data_format == "BTCHW":
-            pass
-
-        input = input.reshape(-1, *input.shape[2:])
+        # Avoid unnecessary reshaping if input is already shape (B, T, C, H, W)
+        if input.shape[0] != -1:
+            input = input.reshape(-1, *input.shape[2:])
         return input
 
     def _input_shape_convert_back(self, input: Tensor, frame_num: int) -> Tensor:
+        # Restore shape according to format
         input = input.view(-1, frame_num, *input.shape[1:])
         if self.data_format == "BCTHW":
             input = input.transpose(1, 2)
-        if self.data_format == "BTCHW":
-            pass
-
         return input
 
     def forward_parameters(self, batch_shape: torch.Size) -> List[ParamItem]:
@@ -232,11 +229,9 @@ class VideoSequential(ImageSequential):
     def inverse_inputs(
         self, input: Tensor, params: List[ParamItem], extra_args: Optional[Dict[str, Any]] = None
     ) -> Tensor:
-        frame_num: int = input.size(self._temporal_channel)
+        frame_num = input.size(self._temporal_channel)
         input = self._input_shape_convert_in(input, frame_num)
-
         input = super().inverse_inputs(input, params, extra_args=extra_args)
-
         input = self._input_shape_convert_back(input, frame_num)
         return input
 
