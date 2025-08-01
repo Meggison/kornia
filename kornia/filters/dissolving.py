@@ -33,11 +33,21 @@ class _DissolvingWraper_HF:
         self.prompt: str
         self.context: Tensor
 
+        # Precompute sqrt(1/alpha_cumprod) and sqrt(1/alpha_cumprod - 1) for all timesteps for faster computation
+        alphas_cumprod = self.model.scheduler.alphas_cumprod
+        # Precompute as 1d tensor on the same device/dtype as alphas_cumprod
+        sqrt_recip_alphas_cumprod = torch.sqrt(1.0 / alphas_cumprod)
+        sqrt_recipm1_alphas_cumprod = torch.sqrt(1.0 / alphas_cumprod - 1)
+
+        self._sqrt_recip_alphas_cumprod = sqrt_recip_alphas_cumprod
+        self._sqrt_recipm1_alphas_cumprod = sqrt_recipm1_alphas_cumprod
+
     def predict_start_from_noise(self, noise_pred: Tensor, timestep: int, latent: Tensor) -> Tensor:
-        return (
-            torch.sqrt(1.0 / self.model.scheduler.alphas_cumprod[timestep]) * latent
-            - torch.sqrt(1.0 / self.model.scheduler.alphas_cumprod[timestep] - 1) * noise_pred
-        )
+        # Use precomputed sqrt coefficients for speedup
+        sqrt_recip = self._sqrt_recip_alphas_cumprod[timestep]
+        sqrt_recipm1 = self._sqrt_recipm1_alphas_cumprod[timestep]
+        # Reduce scalar broadcasting overhead by directly multiplying
+        return sqrt_recip * latent - sqrt_recipm1 * noise_pred
 
     @torch.no_grad()
     def init_prompt(self, prompt: str) -> None:
@@ -75,7 +85,7 @@ class _DissolvingWraper_HF:
     @torch.no_grad()
     def one_step_dissolve(self, latent: Tensor, i: int) -> Tensor:
         _, cond_embeddings = self.context.chunk(2)
-        latent = latent.clone().detach()
+        latent = latent.detach()  # Only .detach() is required (no need to also .clone())
         # NOTE: This implementation use a reversed timesteps but can reach to
         # a stable dissolving effect.
         t = self.num_ddim_steps - self.model.scheduler.timesteps[i]
