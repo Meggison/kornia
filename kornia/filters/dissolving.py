@@ -29,15 +29,22 @@ class _DissolvingWraper_HF:
         self.num_ddim_steps = num_ddim_steps
         self.tokenizer = self.model.tokenizer
         self.model.scheduler.set_timesteps(self.num_ddim_steps)
-        self.total_steps = len(self.model.scheduler.timesteps)  # Total number of sampling steps.
+        self.total_steps = len(self.model.scheduler.timesteps)
         self.prompt: str
         self.context: Tensor
 
+        # Precompute values required in predict_start_from_noise for all timesteps
+        alphas_cumprod = self.model.scheduler.alphas_cumprod
+        # Use torch.as_tensor for fast conversion in case alphas_cumprod isn't already a tensor
+        ac = torch.as_tensor(alphas_cumprod, dtype=torch.float32)
+        self._sqrt_alpha = torch.sqrt(1.0 / ac)
+        self._sqrt_inv = torch.sqrt(1.0 / ac - 1.0)
+
     def predict_start_from_noise(self, noise_pred: Tensor, timestep: int, latent: Tensor) -> Tensor:
-        return (
-            torch.sqrt(1.0 / self.model.scheduler.alphas_cumprod[timestep]) * latent
-            - torch.sqrt(1.0 / self.model.scheduler.alphas_cumprod[timestep] - 1) * noise_pred
-        )
+        # Use cached sqrt values instead of recomputing every call
+        a_sqrt = self._sqrt_alpha[timestep]
+        inv_sqrt = self._sqrt_inv[timestep]
+        return a_sqrt * latent - inv_sqrt * noise_pred
 
     @torch.no_grad()
     def init_prompt(self, prompt: str) -> None:
