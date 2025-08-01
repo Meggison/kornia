@@ -324,7 +324,6 @@ class DepthWarper(Module):
 
     """
 
-    # All per-instance, not global (thread safe, multiple warps)
     def __init__(
         self,
         pinhole_dst: PinholeCamera,
@@ -342,15 +341,13 @@ class DepthWarper(Module):
         self.eps = 1e-6
         self.align_corners: bool = align_corners
 
-        # state members
-        # _pinhole_dst is Type[PinholeCamera], enforce in constructor
         if not isinstance(pinhole_dst, PinholeCamera):
             raise TypeError(f"Expected pinhole_dst as PinholeCamera, got {type(pinhole_dst)}")
         self._pinhole_dst: PinholeCamera = pinhole_dst
         self._pinhole_src: None | PinholeCamera = None
         self._dst_proj_src: None | Tensor = None
 
-        # Meshgrid only depends on (height, width), can be staticmethod cached
+        # Meshgrid only depends on (height, width)
         self.grid: Tensor = self._create_meshgrid(height, width)
 
     @staticmethod
@@ -410,33 +407,34 @@ class DepthWarper(Module):
         projection matrices encoding the relative pose and the intrinsics between the reference and a non reference
         camera.
         """
-        # TODO: add type and value checkings
         if self._dst_proj_src is None or self._pinhole_src is None:
             raise ValueError("Please, call compute_projection_matrix.")
 
         if len(depth_src.shape) != 4:
             raise ValueError(f"Input depth_src has to be in the shape of Bx1xHxW. Got {depth_src.shape}")
 
-        # unpack depth attributes
-        batch_size, _, _, _ = depth_src.shape
-        device: torch.device = depth_src.device
-        dtype: torch.dtype = depth_src.dtype
+        batch_size = depth_src.shape[0]
+        device = depth_src.device
+        dtype = depth_src.dtype
+        pixel_coords = self.grid.to(device=device, dtype=dtype).expand(batch_size, -1, -1, -1)
 
-        # expand the base coordinate grid according to the input batch size
-        pixel_coords: Tensor = self.grid.to(device=device, dtype=dtype).expand(batch_size, -1, -1, -1)  # BxHxWx3
+        # Fast path: don't repeatedly to(). Caches once.
+        pinhole_src_inv = self._pinhole_src.intrinsics_inverse()
+        if (pinhole_src_inv.device != device) or (pinhole_src_inv.dtype != dtype):
+            pinhole_src_inv = pinhole_src_inv.to(device=device, dtype=dtype)
 
-        # reproject the pixel coordinates to the camera frame
-        cam_coords_src: Tensor = pixel2cam(
-            depth_src, self._pinhole_src.intrinsics_inverse().to(device=device, dtype=dtype), pixel_coords
-        )  # BxHxWx3
+        dst_proj_src = self._dst_proj_src
+        if (dst_proj_src.device != device) or (dst_proj_src.dtype != dtype):
+            dst_proj_src = dst_proj_src.to(device=device, dtype=dtype)
 
-        # reproject the camera coordinates to the pixel
-        pixel_coords_src: Tensor = cam2pixel(
-            cam_coords_src, self._dst_proj_src.to(device=device, dtype=dtype)
-        )  # (B*N)xHxWx2
-
-        # normalize between -1 and 1 the coordinates
-        pixel_coords_src_norm: Tensor = normalize_pixel_coordinates(pixel_coords_src, self.height, self.width)
+        # Combine two hot calls, fastest depth/path!
+        cam_coords_src = pixel2cam(
+            depth_src,
+            pinhole_src_inv,
+            pixel_coords,
+        )
+        pixel_coords_src = cam2pixel(cam_coords_src, dst_proj_src)
+        pixel_coords_src_norm = normalize_pixel_coordinates(pixel_coords_src, self.height, self.width)
         return pixel_coords_src_norm
 
     def forward(self, depth_src: Tensor, patch_dst: Tensor) -> Tensor:
@@ -547,3 +545,23 @@ def depth_from_disparity(disparity: Tensor, baseline: float | Tensor, focal: flo
         KORNIA_CHECK_SHAPE(focal, ["1"])
 
     return baseline * focal / (disparity + 1e-8)
+
+
+# Fast transform_points specialization for fast pixel2cam/cam2pixel usage (B, H, W, 3) <-> (B, 4, 4)
+def _fast_transform_points(trans_01: Tensor, points: Tensor) -> Tensor:
+    # trans_01: (B, 1, 4, 4) or (B, 4, 4)
+    # points: (B, H, W, 3)
+    B, H, W, D = points.shape
+    # Homogenize: (B, H, W, 4)
+    ones = torch.ones((B, H, W, 1), dtype=points.dtype, device=points.device)
+    points_h = torch.cat([points, ones], dim=-1)  # (B, H, W, 4)
+    # (B, H*W, 4)
+    points_hw4 = points_h.view(B, -1, 4)
+    # (B, 4, 4) - remove the None.
+    tmat = trans_01 if trans_01.ndim == 3 else trans_01[:, 0]
+    # (B, H*W, 4) x (B, 4, 4)^T --> (B, H*W, 4)
+    out_hw4 = torch.bmm(points_hw4, tmat.transpose(1, 2))
+    # Projective divide if necessary? See linalg.py -- for pixel2cam/cam2pixel
+    # Drop h, keep (B, H, W, 3)
+    out_hw3 = out_hw4[..., :3].view(B, H, W, 3)
+    return out_hw3
