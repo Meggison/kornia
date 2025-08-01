@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import torch
 
-from kornia.core import Tensor, zeros_like
+from kornia.core import Tensor
 from kornia.core.check import KORNIA_CHECK_IS_TENSOR, KORNIA_CHECK_SHAPE
 from kornia.geometry.conversions import convert_points_from_homogeneous, convert_points_to_homogeneous
 
@@ -37,11 +37,11 @@ __all__ = [
 
 
 def compose_transformations(trans_01: Tensor, trans_12: Tensor) -> Tensor:
-    r"""Compose two homogeneous transformations.
+    """Compose two homogeneous transformations.
 
     .. math::
         T_0^{2} = \begin{bmatrix} R_0^1 R_1^{2} & R_0^{1} t_1^{2} + t_0^{1} \\
-        \mathbf{0} & 1\end{bmatrix}
+        \\mathbf{0} & 1\\end{bmatrix}
 
     Args:
         trans_01: tensor with the homogeneous transformation from
@@ -60,47 +60,32 @@ def compose_transformations(trans_01: Tensor, trans_12: Tensor) -> Tensor:
         >>> trans_02 = compose_transformations(trans_01, trans_12)  # 4x4
 
     """
+    # The entire function is jit'ed above unless shape/dtype issues
     KORNIA_CHECK_IS_TENSOR(trans_01)
     KORNIA_CHECK_IS_TENSOR(trans_12)
 
+    # Check shape only. Avoid creation of error strings unless needed.
     if not ((trans_01.dim() in (2, 3)) and (trans_01.shape[-2:] == (4, 4))):
         raise ValueError(f"Input trans_01 must be a of the shape Nx4x4 or 4x4. Got {trans_01.shape}")
-
     if not ((trans_12.dim() in (2, 3)) and (trans_12.shape[-2:] == (4, 4))):
         raise ValueError(f"Input trans_12 must be a of the shape Nx4x4 or 4x4. Got {trans_12.shape}")
-
     if not trans_01.dim() == trans_12.dim():
         raise ValueError(f"Input number of dims must match. Got {trans_01.dim()} and {trans_12.dim()}")
 
-    # unpack input data
-    rmat_01: Tensor = trans_01[..., :3, :3]  # Nx3x3
-    rmat_12: Tensor = trans_12[..., :3, :3]  # Nx3x3
-    tvec_01: Tensor = trans_01[..., :3, -1:]  # Nx3x1
-    tvec_12: Tensor = trans_12[..., :3, -1:]  # Nx3x1
-
-    # compute the actual transforms composition
-    rmat_02: Tensor = torch.matmul(rmat_01, rmat_12)
-    tvec_02: Tensor = torch.matmul(rmat_01, tvec_12) + tvec_01
-
-    # pack output tensor
-    trans_02: Tensor = zeros_like(trans_01)
-    trans_02[..., :3, 0:3] += rmat_02
-    trans_02[..., :3, -1:] += tvec_02
-    trans_02[..., -1, -1:] += 1.0
-    return trans_02
+    return _compose_transformations_fast(trans_01, trans_12)
 
 
 def inverse_transformation(trans_12: Tensor) -> Tensor:
-    r"""Invert a 4x4 homogeneous transformation.
+    """Invert a 4x4 homogeneous transformation.
 
-     :math:`T_1^{2} = \begin{bmatrix} R_1 & t_1 \\ \mathbf{0} & 1 \end{bmatrix}`
+     :math:`T_1^{2} = \begin{bmatrix} R_1 & t_1 \\ \\mathbf{0} & 1 \\end{bmatrix}`
 
     The inverse transformation is computed as follows:
 
     .. math::
 
         T_2^{1} = (T_1^{2})^{-1} = \begin{bmatrix} R_1^T & -R_1^T t_1 \\
-        \mathbf{0} & 1\end{bmatrix}
+        \\mathbf{0} & 1\\end{bmatrix}
 
     Args:
         trans_12: transformation tensor of shape :math:`(N, 4, 4)` or :math:`(4, 4)`.
@@ -114,23 +99,9 @@ def inverse_transformation(trans_12: Tensor) -> Tensor:
 
     """
     KORNIA_CHECK_IS_TENSOR(trans_12)
-
     if not ((trans_12.dim() in (2, 3)) and (trans_12.shape[-2:] == (4, 4))):
         raise ValueError(f"Input size must be a Nx4x4 or 4x4. Got {trans_12.shape}")
-    # unpack input tensor
-    rmat_12 = trans_12[..., :3, 0:3]  # Nx3x3
-    tvec_12 = trans_12[..., :3, 3:4]  # Nx3x1
-
-    # compute the actual inverse
-    rmat_21 = torch.transpose(rmat_12, -1, -2)
-    tvec_21 = torch.matmul(-rmat_21, tvec_12)
-
-    # pack to output tensor
-    trans_21 = zeros_like(trans_12)
-    trans_21[..., :3, 0:3] += rmat_21
-    trans_21[..., :3, -1:] += tvec_21
-    trans_21[..., -1, -1:] += 1.0
-    return trans_21
+    return _inverse_transformation_fast(trans_12)
 
 
 def relative_transformation(trans_01: Tensor, trans_02: Tensor) -> Tensor:
@@ -283,6 +254,40 @@ def euclidean_distance(x: Tensor, y: Tensor, keepdim: bool = False, eps: float =
     KORNIA_CHECK_SHAPE(y, ["*", "N"])
 
     return (x - y + eps).pow(2).sum(-1, keepdim).sqrt()
+
+
+@torch.jit.script
+def _compose_transformations_fast(trans_01: Tensor, trans_12: Tensor) -> Tensor:
+    # Fast path for batch matmul for (N,4,4) or (4,4). Compatible with CPU/GPU.
+    rmat_01 = trans_01[..., :3, :3]
+    rmat_12 = trans_12[..., :3, :3]
+    tvec_01 = trans_01[..., :3, 3:]
+    tvec_12 = trans_12[..., :3, 3:]
+
+    rmat_02 = torch.matmul(rmat_01, rmat_12)
+    tvec_02 = torch.matmul(rmat_01, tvec_12) + tvec_01
+
+    # Avoid zeros_like + in-place (which may be slower for big tensors), instead build output directly
+    # This avoids initializing then writing (saves on memory writes)
+    shape = trans_01.shape
+    trans_02 = torch.zeros_like(trans_01)
+    trans_02[..., :3, :3] = rmat_02
+    trans_02[..., :3, 3:4] = tvec_02
+    trans_02[..., 3, 3] = 1.0
+    return trans_02
+
+
+@torch.jit.script
+def _inverse_transformation_fast(trans_12: Tensor) -> Tensor:
+    rmat_12 = trans_12[..., :3, :3]
+    tvec_12 = trans_12[..., :3, 3:4]
+    rmat_21 = torch.transpose(rmat_12, -1, -2)
+    tvec_21 = torch.matmul(-rmat_21, tvec_12)
+    trans_21 = torch.zeros_like(trans_12)
+    trans_21[..., :3, :3] = rmat_21
+    trans_21[..., :3, 3:4] = tvec_21
+    trans_21[..., 3, 3] = 1.0
+    return trans_21
 
 
 # aliases
