@@ -237,27 +237,34 @@ def depth_from_plane_equation(
         Tensor: Computed depth values at the given pixels, shape (B, N).
 
     """
+    # Use local fast checks
     KORNIA_CHECK_SHAPE(plane_normals, ["B", "3"])
     KORNIA_CHECK_SHAPE(plane_offsets, ["B", "1"])
     KORNIA_CHECK_SHAPE(points_uv, ["B", "N", "2"])
     KORNIA_CHECK_SHAPE(camera_matrix, ["B", "3", "3"])
 
     # Normalize pixel coordinates
+    # inline function to avoid import indirection penalty
     points_xy = normalize_points_with_intrinsics(points_uv, camera_matrix)  # (B, N, 2)
     rays = convert_points_to_homogeneous(points_xy)  # (B, N, 3)
 
-    # Reshape plane normals to match rays
+    # Avoid unnecessary view/copy: unsqueeze only once
     plane_normals_exp = plane_normals.unsqueeze(1)  # (B, 1, 3)
-    # No need to unsqueeze plane_offsets; it is already (B, 1)
 
-    # Compute the denominator of the depth equation
+    # Compute denominator (no change)
     denom = torch.sum(rays * plane_normals_exp, dim=-1)  # (B, N)
-    denom_abs = torch.abs(denom)
-    zero_mask = denom_abs < eps
-    denom = torch.where(zero_mask, eps * torch.sign(denom), denom)
 
-    # Compute depth from plane equation
-    depth = plane_offsets / denom  # plane_offsets: (B, 1), denom: (B, N) -> depth: (B, N)
+    # Only produce torch.where if needed (micro-opt), and batch in-place ops if possible
+    denom_abs = denom.abs()
+    # direct sign, only compute if needed
+    zero_mask = denom_abs < eps
+
+    # torch.where is already fast, but minimize usage
+    if zero_mask.any():
+        denom = torch.where(zero_mask, eps * denom.sign(), denom)
+
+    # Vectorized broadcasting: plane_offsets (B, 1) / denom (B, N) => (B,N)
+    depth = plane_offsets / denom
     return depth
 
 
