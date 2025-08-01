@@ -464,3 +464,6 @@ def _handle_invalid_range(msg: Optional[str], raises: bool, min_val: float | Ten
     if raises:
         raise ValueError(err_msg)
     return False
+
+
+_meshgrid_cache = {}

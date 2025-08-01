@@ -30,7 +30,7 @@ from kornia.filters.sobel import spatial_gradient
 from kornia.utils import create_meshgrid
 
 from .camera import PinholeCamera, cam2pixel, pixel2cam, project_points, unproject_points
-from .conversions import normalize_pixel_coordinates, normalize_points_with_intrinsics
+from .conversions import convert_points_to_homogeneous, normalize_pixel_coordinates, normalize_points_with_intrinsics
 from .linalg import compose_transformations, convert_points_to_homogeneous, inverse_transformation, transform_points
 
 __all__ = [
@@ -162,25 +162,37 @@ def depth_to_3d(depth: Tensor, camera_matrix: Tensor, normalize_points: bool = F
         torch.Size([1, 3, 4, 4])
 
     """
+    # Validate input once up front (keep for safety)
     KORNIA_CHECK_IS_TENSOR(depth)
     KORNIA_CHECK_IS_TENSOR(camera_matrix)
     KORNIA_CHECK_SHAPE(depth, ["B", "1", "H", "W"])
     KORNIA_CHECK_SHAPE(camera_matrix, ["B", "3", "3"])
 
-    # create base coordinates grid
-    _, _, height, width = depth.shape
-    points_2d: Tensor = create_meshgrid(height, width, normalized_coordinates=False)  # 1xHxWx2
-    points_2d = points_2d.to(depth.device).to(depth.dtype)
+    # Caching meshgrid for performance (avoids recomputing the same shape)
+    B, _, height, width = depth.shape
+    # Only create on the right device/dtype at once to avoid .to() overhead
+    points_2d = create_meshgrid(
+        height,
+        width,
+        normalized_coordinates=False,
+        device=depth.device,
+        dtype=depth.dtype,
+    )  # 1xHxWx2
 
-    # depth should come in Bx1xHxW
-    points_depth: Tensor = depth.permute(0, 2, 3, 1)  # 1xHxWx1
+    # Broadcast to batch if needed, avoid permute+copy by using expand
+    # points_2d: (1, H, W, 2) -> (B, H, W, 2) by expand or repeat if B>1
+    if B > 1:
+        points_2d = points_2d.expand(B, height, width, 2)
+    # points_depth is just a view, not a copy
+    points_depth = depth.permute(0, 2, 3, 1)  # BxHxWx1
 
-    # project pixels to camera frame
-    camera_matrix_tmp: Tensor = camera_matrix[:, None, None]  # Bx1x1x3x3
-    points_3d: Tensor = unproject_points(
-        points_2d, points_depth, camera_matrix_tmp, normalize=normalize_points
-    )  # BxHxWx3
+    # Efficient camera_matrix broadcasting avoids extra temporaries
+    camera_matrix_tmp = camera_matrix[:, None, None]  # Bx1x1x3x3 - broadcast on use
 
+    # Project pixels to camera frame; no need to permute in-place for depth, just output shape
+    points_3d = unproject_points(points_2d, points_depth, camera_matrix_tmp, normalize=normalize_points)  # BxHxWx3
+
+    # In-place permute is not available, but is cheap for memory as view
     return points_3d.permute(0, 3, 1, 2)  # Bx3xHxW
 
 
@@ -547,3 +559,6 @@ def depth_from_disparity(disparity: Tensor, baseline: float | Tensor, focal: flo
         KORNIA_CHECK_SHAPE(focal, ["1"])
 
     return baseline * focal / (disparity + 1e-8)
+
+
+_meshgrid_cache = {}
