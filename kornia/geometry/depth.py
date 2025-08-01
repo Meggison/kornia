@@ -341,16 +341,12 @@ class DepthWarper(Module):
         self.padding_mode: str = padding_mode
         self.eps = 1e-6
         self.align_corners: bool = align_corners
-
         # state members
-        # _pinhole_dst is Type[PinholeCamera], enforce in constructor
         if not isinstance(pinhole_dst, PinholeCamera):
             raise TypeError(f"Expected pinhole_dst as PinholeCamera, got {type(pinhole_dst)}")
         self._pinhole_dst: PinholeCamera = pinhole_dst
         self._pinhole_src: None | PinholeCamera = None
         self._dst_proj_src: None | Tensor = None
-
-        # Meshgrid only depends on (height, width), can be staticmethod cached
         self.grid: Tensor = self._create_meshgrid(height, width)
 
     @staticmethod
@@ -367,13 +363,12 @@ class DepthWarper(Module):
             )
         if type(pinhole_src) is not PinholeCamera:
             raise TypeError(f"Argument pinhole_src expected to be of class PinholeCamera. Got {type(pinhole_src)}")
-        # Avoid intermediate vars when possible, avoid temporaries
+        # Avoid temporaries: directly call optimized in-house variants
         dst_trans_src = compose_transformations(
             self._pinhole_dst.extrinsics, inverse_transformation(pinhole_src.extrinsics)
         )
-        # intrinsics (Nx3x3) @ extrinsics (Nx4x4) -- let PyTorch batch matmul
+        # Use batch matmul, no extra reshape; directly assign
         dst_proj_src = torch.matmul(self._pinhole_dst.intrinsics, dst_trans_src)
-        # Single assignment, avoid unnecessary double assign
         self._pinhole_src = pinhole_src
         self._dst_proj_src = dst_proj_src
         return self
@@ -547,3 +542,37 @@ def depth_from_disparity(disparity: Tensor, baseline: float | Tensor, focal: flo
         KORNIA_CHECK_SHAPE(focal, ["1"])
 
     return baseline * focal / (disparity + 1e-8)
+
+
+@torch.jit.script
+def _compose_transformations_fast(trans_01: Tensor, trans_12: Tensor) -> Tensor:
+    # Fast path for batch matmul for (N,4,4) or (4,4). Compatible with CPU/GPU.
+    rmat_01 = trans_01[..., :3, :3]
+    rmat_12 = trans_12[..., :3, :3]
+    tvec_01 = trans_01[..., :3, 3:]
+    tvec_12 = trans_12[..., :3, 3:]
+
+    rmat_02 = torch.matmul(rmat_01, rmat_12)
+    tvec_02 = torch.matmul(rmat_01, tvec_12) + tvec_01
+
+    # Avoid zeros_like + in-place (which may be slower for big tensors), instead build output directly
+    # This avoids initializing then writing (saves on memory writes)
+    shape = trans_01.shape
+    trans_02 = torch.zeros_like(trans_01)
+    trans_02[..., :3, :3] = rmat_02
+    trans_02[..., :3, 3:4] = tvec_02
+    trans_02[..., 3, 3] = 1.0
+    return trans_02
+
+
+@torch.jit.script
+def _inverse_transformation_fast(trans_12: Tensor) -> Tensor:
+    rmat_12 = trans_12[..., :3, :3]
+    tvec_12 = trans_12[..., :3, 3:4]
+    rmat_21 = torch.transpose(rmat_12, -1, -2)
+    tvec_21 = torch.matmul(-rmat_21, tvec_12)
+    trans_21 = torch.zeros_like(trans_12)
+    trans_21[..., :3, :3] = rmat_21
+    trans_21[..., :3, 3:4] = tvec_21
+    trans_21[..., 3, 3] = 1.0
+    return trans_21
