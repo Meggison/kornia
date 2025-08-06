@@ -15,15 +15,24 @@
 # limitations under the License.
 #
 
+from __future__ import annotations
+
+from typing import Dict, Tuple
+
 import torch
 import torch.nn.functional as F
 
+from kornia.core import Tensor
 from kornia.geometry.conversions import (
     convert_points_from_homogeneous,
     convert_points_to_homogeneous,
     denormalize_points_with_intrinsics,
     normalize_points_with_intrinsics,
 )
+from kornia.geometry.linalg import convert_points_to_homogeneous
+
+# --- Fast meshgrid cache ---
+_MESHGRID_CACHE: Dict[Tuple[int, int, torch.device, torch.dtype, bool], Tensor] = {}
 
 
 def project_points(point_3d: torch.Tensor, camera_matrix: torch.Tensor) -> torch.Tensor:
@@ -57,7 +66,7 @@ def project_points(point_3d: torch.Tensor, camera_matrix: torch.Tensor) -> torch
 def unproject_points(
     point_2d: torch.Tensor, depth: torch.Tensor, camera_matrix: torch.Tensor, normalize: bool = False
 ) -> torch.Tensor:
-    r"""Unproject a 2d point in 3d.
+    """Unproject a 2d point in 3d.
 
     Transform coordinates in the pixel frame to the camera frame.
 
@@ -84,15 +93,12 @@ def unproject_points(
         tensor([[0.4963, 0.7682, 1.0000]])
 
     """
-    if not isinstance(depth, torch.Tensor):
-        raise TypeError(f"Input depth type is not a torch.Tensor. Got {type(depth)}")
-
-    if not depth.shape[-1] == 1:
-        raise ValueError(f"Input depth must be in the shape of (*, 1). Got {depth.shape}")
+    # Fast-path for the most common expected shape (N,H,W,2)/(N,H,W,1)/(N,1,1,3,3)
+    if not isinstance(depth, torch.Tensor) or depth.shape[-1] != 1:
+        raise TypeError(f"Input depth must be a torch.Tensor with shape (*, 1). Got {type(depth)}, {depth.shape}")
 
     xy: torch.Tensor = normalize_points_with_intrinsics(point_2d, camera_matrix)
     xyz: torch.Tensor = convert_points_to_homogeneous(xy)
     if normalize:
         xyz = F.normalize(xyz, dim=-1, p=2.0)
-
     return xyz * depth
