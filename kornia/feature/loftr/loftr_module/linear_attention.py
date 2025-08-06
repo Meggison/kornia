@@ -31,7 +31,8 @@ from kornia.core import Module, Tensor
 
 def elu_feature_map(x: Tensor) -> Tensor:
     """Apply elu activation."""
-    return torch.nn.functional.elu(x) + 1
+    # Pre-allocated result variable to avoid extra temporary tensor from '+ 1'
+    return torch.nn.functional.elu(x, inplace=False).add_(1)
 
 
 class LinearAttention(Module):
