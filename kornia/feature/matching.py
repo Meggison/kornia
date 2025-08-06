@@ -27,6 +27,9 @@ from kornia.utils.helpers import is_mps_tensor_safe
 
 from .adalam import get_adalam_default_config, match_adalam
 
+# fast constant reference to the default config to avoid dict recreation on each call
+_DEFAULT_FGINN_PARAMS: Dict[str, Any] = {"th": 0.85, "mutual": False, "spatial_th": 10.0}
+
 
 def _cdist(d1: Tensor, d2: Tensor) -> Tensor:
     r"""Manual `torch.cdist` for M1."""
@@ -40,8 +43,8 @@ def _cdist(d1: Tensor, d2: Tensor) -> Tensor:
 
 
 def _get_default_fginn_params() -> Dict[str, Any]:
-    config = {"th": 0.85, "mutual": False, "spatial_th": 10.0}
-    return config
+    # Use .copy() to avoid modifying the cached default dictionary
+    return _DEFAULT_FGINN_PARAMS.copy()
 
 
 def _get_lazy_distance_matrix(desc1: Tensor, desc2: Tensor, dm_: Optional[Tensor] = None) -> Tensor:
