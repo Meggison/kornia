@@ -30,7 +30,7 @@ from kornia.filters.sobel import spatial_gradient
 from kornia.utils import create_meshgrid
 
 from .camera import PinholeCamera, cam2pixel, pixel2cam, project_points, unproject_points
-from .conversions import normalize_pixel_coordinates, normalize_points_with_intrinsics
+from .conversions import convert_points_to_homogeneous, normalize_pixel_coordinates, normalize_points_with_intrinsics
 from .linalg import compose_transformations, convert_points_to_homogeneous, inverse_transformation, transform_points
 
 """Module containing operators to work on RGB-Depth images."""
@@ -164,26 +164,35 @@ def depth_to_3d(depth: Tensor, camera_matrix: Tensor, normalize_points: bool = F
         torch.Size([1, 3, 4, 4])
 
     """
+    # Fast path: direct vectorized grid construction, batch handling for speedup and fused conversion
     KORNIA_CHECK_IS_TENSOR(depth)
     KORNIA_CHECK_IS_TENSOR(camera_matrix)
     KORNIA_CHECK_SHAPE(depth, ["B", "1", "H", "W"])
     KORNIA_CHECK_SHAPE(camera_matrix, ["B", "3", "3"])
 
-    # create base coordinates grid
-    _, _, height, width = depth.shape
-    points_2d: Tensor = create_meshgrid(height, width, normalized_coordinates=False)  # 1xHxWx2
-    points_2d = points_2d.to(depth.device).to(depth.dtype)
+    B, _, H, W = depth.shape
 
-    # depth should come in Bx1xHxW
-    points_depth: Tensor = depth.permute(0, 2, 3, 1)  # 1xHxWx1
+    # Efficiently create a meshgrid for all B in a single allocation on the correct device/dtype
+    # meshgrid: (1, H, W, 2) -> (B, H, W, 2) by expand
+    grid = create_meshgrid(H, W, normalized_coordinates=False, device=depth.device, dtype=depth.dtype)  # 1xHxWx2
+    grid = grid.expand(B, -1, -1, -1)  # BxHxWx2
 
-    # project pixels to camera frame
-    camera_matrix_tmp: Tensor = camera_matrix[:, None, None]  # Bx1x1x3x3
-    points_3d: Tensor = unproject_points(
-        points_2d, points_depth, camera_matrix_tmp, normalize=normalize_points
-    )  # BxHxWx3
+    # permute depth to BxHxWx1, ready for unproject_points
+    depth_reshaped = depth.permute(0, 2, 3, 1)  # BxHxWx1
 
-    return points_3d.permute(0, 3, 1, 2)  # Bx3xHxW
+    # Add batch dims to camera matrix for broadcasting (Bx1x1x3x3)
+    cam_B11 = camera_matrix[:, None, None, :, :]  # Bx1x1x3x3 (no copy)
+    # Flatten spatial dimensions for fast batched ops
+    flat_grid = grid.reshape(B, H * W, 2)
+    flat_depth = depth_reshaped.reshape(B, H * W, 1)
+    flat_cam = cam_B11.expand(B, H, W, 3, 3).reshape(B, H * W, 3, 3)
+
+    # Efficient per-pixel unprojection (vectorized over B and N = H*W)
+    xyz = unproject_points(flat_grid, flat_depth, flat_cam, normalize=normalize_points)  # Bx(H*W)x3
+    xyz = xyz.reshape(B, H, W, 3)
+
+    # Rearrange to (B, 3, H, W)
+    return xyz.permute(0, 3, 1, 2)
 
 
 def depth_to_normals(depth: Tensor, camera_matrix: Tensor, normalize_points: bool = False) -> Tensor:
@@ -283,27 +292,33 @@ def warp_frame_depth(
         the warped tensor in the source frame with shape :math:`(B,3,H,W)`.
 
     """
+    # Fast path: minimize permutes and tensor creation, batch project/transform points
     KORNIA_CHECK_SHAPE(image_src, ["B", "D", "H", "W"])
     KORNIA_CHECK_SHAPE(depth_dst, ["B", "1", "H", "W"])
     KORNIA_CHECK_SHAPE(src_trans_dst, ["B", "4", "4"])
     KORNIA_CHECK_SHAPE(camera_matrix, ["B", "3", "3"])
 
-    # unproject source points to camera frame
-    points_3d_dst: Tensor = depth_to_3d(depth_dst, camera_matrix, normalize_points)  # Bx3xHxW
+    # Unproject to 3D points (B, 3, H, W)
+    points_3d_dst = depth_to_3d(depth_dst, camera_matrix, normalize_points)  # Bx3xHxW
+    B, _, H, W = points_3d_dst.shape
 
-    # transform points from source to destination
-    points_3d_dst = points_3d_dst.permute(0, 2, 3, 1)  # BxHxWx3
+    # Change to (B, H*W, 3) for batch transform
+    points_3d_dst_flat = points_3d_dst.permute(0, 2, 3, 1).reshape(B, H * W, 3)  # Bx(H*W)x3
 
-    # apply transformation to the 3d points
-    points_3d_src = transform_points(src_trans_dst[:, None], points_3d_dst)  # BxHxWx3
+    # Prepare transformation matrices (Bx1x4x4 in case they need broadcasting)
+    # Instead of extra permute, use already flattened points
+    # Need to create points as (BxN)x3 and trans as (Bx4x4). But transform_points expects points (B, N, D)
+    points_3d_src_flat = transform_points(src_trans_dst, points_3d_dst_flat)  # Bx(H*W)x3
 
-    # project back to pixels
-    camera_matrix_tmp: Tensor = camera_matrix[:, None, None]  # Bx1x1xHxW
-    points_2d_src: Tensor = project_points(points_3d_src, camera_matrix_tmp)  # BxHxWx2
+    # Project to 2D
+    camera_matrix_expand = camera_matrix[:, None, None, :, :].expand(B, H, W, 3, 3).reshape(B, H * W, 3, 3)
+    points_2d_src_flat = project_points(points_3d_src_flat, camera_matrix_expand)  # Bx(H*W)x2
 
-    # normalize points between [-1 / 1]
-    height, width = depth_dst.shape[-2:]
-    points_2d_src_norm: Tensor = normalize_pixel_coordinates(points_2d_src, height, width)  # BxHxWx2
+    # Reshape back to (B, H, W, 2)
+    points_2d_src = points_2d_src_flat.reshape(B, H, W, 2)
+
+    # Normalize pixel coordinates
+    points_2d_src_norm = normalize_pixel_coordinates(points_2d_src, H, W)  # BxHxWx2
 
     return kornia_ops.map_coordinates(image_src, points_2d_src_norm, align_corners=True)
 

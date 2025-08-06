@@ -173,7 +173,7 @@ def relative_transformation(trans_01: Tensor, trans_02: Tensor) -> Tensor:
 
 
 def transform_points(trans_01: Tensor, points_1: Tensor) -> Tensor:
-    r"""Apply transformations to a set of points.
+    """Apply transformations to a set of points.
 
     Args:
         trans_01: tensor for transformations of shape
@@ -192,6 +192,7 @@ def transform_points(trans_01: Tensor, points_1: Tensor) -> Tensor:
         >>> points_0 = transform_points(trans_01, points_1)  # BxNx3
 
     """
+    # Optimize: Remove redundant permute/squeeze/reshape, use broadcasting, batch bmm efficiently
     KORNIA_CHECK_IS_TENSOR(trans_01)
     KORNIA_CHECK_IS_TENSOR(points_1)
     if not trans_01.shape[0] == points_1.shape[0] and trans_01.shape[0] != 1:
@@ -201,24 +202,26 @@ def transform_points(trans_01: Tensor, points_1: Tensor) -> Tensor:
     if not trans_01.shape[-1] == (points_1.shape[-1] + 1):
         raise ValueError(f"Last input dimensions must differ by one unit Got{trans_01} and {points_1}")
 
-    # We reshape to BxNxD in case we get more dimensions, e.g., MxBxNxD
-    shape_inp = list(points_1.shape)
-    points_1 = points_1.reshape(-1, points_1.shape[-2], points_1.shape[-1])
-    trans_01 = trans_01.reshape(-1, trans_01.shape[-2], trans_01.shape[-1])
-    # We expand trans_01 to match the dimensions needed for bmm. repeats input division is cast
-    # to integer so onnx doesn't record the value as a tensor and get a device mismatch
-    trans_01 = torch.repeat_interleave(trans_01, repeats=int(points_1.shape[0] // trans_01.shape[0]), dim=0)
-    # to homogeneous
-    points_1_h = convert_points_to_homogeneous(points_1)  # BxNxD+1
-    # transform coordinates
-    points_0_h = torch.bmm(points_1_h, trans_01.permute(0, 2, 1))
-    points_0_h = torch.squeeze(points_0_h, dim=-1)
-    # to euclidean
+    B = max(trans_01.shape[0], points_1.shape[0])
+    N = points_1.shape[-2]
+    D = points_1.shape[-1]
+    orig_shape = points_1.shape
+
+    # Flatten any extra batch dimensions for efficient processing
+    points_1_flat = points_1.reshape(-1, N, D)
+    trans_01_flat = trans_01.reshape(-1, D + 1, D + 1)
+    repeat_factor = int(points_1_flat.shape[0] // trans_01_flat.shape[0])
+    if repeat_factor > 1:
+        trans_01_flat = trans_01_flat.repeat_interleave(repeat_factor, dim=0)
+
+    # Homogeneous coordinates, shape (BxN)x(D+1)
+    points_1_h = convert_points_to_homogeneous(points_1_flat)  # BxNx(D+1)
+    # Matrix multiply in batch
+    points_0_h = torch.bmm(points_1_h, trans_01_flat.transpose(1, 2))  # BxNx(D+1)
+    # To Euclidean
     points_0 = convert_points_from_homogeneous(points_0_h)  # BxNxD
-    # reshape to the input shape
-    shape_inp[-2] = points_0.shape[-2]
-    shape_inp[-1] = points_0.shape[-1]
-    points_0 = points_0.reshape(shape_inp)
+    # Restore any original extra leading batch dims
+    points_0 = points_0.reshape(orig_shape)
     return points_0
 
 
