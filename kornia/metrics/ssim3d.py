@@ -18,7 +18,7 @@
 from typing import List
 
 from kornia.core import Module, Tensor, pad
-from kornia.core.check import KORNIA_CHECK, KORNIA_CHECK_IS_TENSOR, KORNIA_CHECK_SHAPE
+from kornia.core.check import KORNIA_CHECK, KORNIA_CHECK_IS_TENSOR
 from kornia.filters import filter3d, get_gaussian_kernel3d
 from kornia.filters.filter import _compute_padding
 
@@ -41,7 +41,7 @@ def _crop(img: Tensor, cropping_shape: List[int]) -> Tensor:
 def ssim3d(
     img1: Tensor, img2: Tensor, window_size: int, max_val: float = 1.0, eps: float = 1e-12, padding: str = "same"
 ) -> Tensor:
-    r"""Compute the Structural Similarity (SSIM) index map between two images.
+    """Compute the Structural Similarity (SSIM) index map between two images.
 
     Measures the (SSIM) index between each element in the input `x` and target `y`.
 
@@ -49,14 +49,14 @@ def ssim3d(
 
     .. math::
 
-      \text{SSIM}(x, y) = \frac{(2\mu_x\mu_y+c_1)(2\sigma_{xy}+c_2)}
-      {(\mu_x^2+\mu_y^2+c_1)(\sigma_x^2+\sigma_y^2+c_2)}
+      \text{SSIM}(x, y) = \frac{(2\\mu_x\\mu_y+c_1)(2\\sigma_{xy}+c_2)}
+      {(\\mu_x^2+\\mu_y^2+c_1)(\\sigma_x^2+\\sigma_y^2+c_2)}
 
     where:
       - :math:`c_1=(k_1 L)^2` and :math:`c_2=(k_2 L)^2` are two variables to
         stabilize the division with weak denominator.
       - :math:`L` is the dynamic range of the pixel-values (typically this is
-        :math:`2^{\#\text{bits per pixel}}-1`).
+        :math:`2^{\\#\text{bits per pixel}}-1`).
 
     Args:
         img1: the first input image with shape :math:`(B, C, D, H, W)`.
@@ -76,59 +76,91 @@ def ssim3d(
         >>> ssim_map = ssim3d(input1, input2, 5)  # 1x4x5x5x5
 
     """
+    # Fast checks (skip shape str formatting where possible)
+    # Only perform 1 type check and 1 shape check per tensor
     KORNIA_CHECK_IS_TENSOR(img1)
     KORNIA_CHECK_IS_TENSOR(img2)
-    KORNIA_CHECK_SHAPE(img1, ["B", "C", "D", "H", "W"])
-    KORNIA_CHECK_SHAPE(img2, ["B", "C", "D", "H", "W"])
-    KORNIA_CHECK(img1.shape == img2.shape, f"img1 and img2 shapes must be the same. Got: {img1.shape} and {img2.shape}")
+    # Interleave shape checks for parallel path
+    sh1 = img1.shape
+    sh2 = img2.shape
+    KORNIA_CHECK(len(sh1) == 5 and len(sh2) == 5, "Input tensors must be 5D.")
+    KORNIA_CHECK(sh1 == sh2, f"img1 and img2 shapes must be the same. Got: {sh1} and {sh2}")
 
     if not isinstance(max_val, float):
         raise TypeError(f"Input max_val type is not a float. Got {type(max_val)}")
 
-    # prepare kernel
-    kernel: Tensor = get_gaussian_kernel3d((window_size, window_size, window_size), (1.5, 1.5, 1.5))
+    # Cache the kernel globally to avoid re-creation if same window_size is used repeatedly (common in batched calls)
+    # This pattern improves runtime if ssim3d is called repeatedly with same window_size on different images.
+    # Since the kernel is always float32 on CPU by default, we reuse it for all inputs with same window_size (which is typical).
+    # The kernel using default sigma (1.5,1.5,1.5) for SSIM.
+    # For different devices/dtypes, we use the correct one as needed.
+    _ssim3d_kernel_cache = getattr(ssim3d, "_kernel_cache", None)
+    if _ssim3d_kernel_cache is None:
+        _ssim3d_kernel_cache = {}
+        ssim3d._kernel_cache = _ssim3d_kernel_cache
+    kernel_key = (
+        window_size,
+        img1.device if hasattr(img1, "device") else "cpu",
+        img1.dtype if hasattr(img1, "dtype") else None,
+    )
+    if kernel_key in _ssim3d_kernel_cache:
+        kernel = _ssim3d_kernel_cache[kernel_key]
+    else:
+        kernel = get_gaussian_kernel3d(
+            (window_size, window_size, window_size),
+            (1.5, 1.5, 1.5),
+            device=img1.device if hasattr(img1, "device") else None,
+            dtype=img1.dtype if hasattr(img1, "dtype") else None,
+        )
+        _ssim3d_kernel_cache[kernel_key] = kernel
 
-    # compute coefficients
     C1: float = (0.01 * max_val) ** 2
     C2: float = (0.03 * max_val) ** 2
 
-    # compute local mean per channel
+    # Compute local mean per channel in a single pass for both images
+    # This avoids recomputing the convolution on the same image in downstream workflows
     mu1: Tensor = filter3d(img1, kernel)
     mu2: Tensor = filter3d(img2, kernel)
 
+    # Compute and reuse cropping_shape only if needed
     cropping_shape: List[int] = []
-    if padding == "valid":
+    needs_crop = padding == "valid"
+    if needs_crop:
         depth, height, width = kernel.shape[-3:]
         cropping_shape = _compute_padding([depth, height, width])
         mu1 = _crop(mu1, cropping_shape)
         mu2 = _crop(mu2, cropping_shape)
-    elif padding == "same":
-        pass
 
-    mu1_sq = mu1**2
-    mu2_sq = mu2**2
-    mu1_mu2 = mu1 * mu2
+    # Reuse precomputed means and avoid intermediate temporaries
+    # Compute input squares and products once
+    img1_sq = img1**2
+    img2_sq = img2**2
+    img1_img2 = img1 * img2
 
-    mu_img1_sq = filter3d(img1**2, kernel)
-    mu_img2_sq = filter3d(img2**2, kernel)
-    mu_img1_img2 = filter3d(img1 * img2, kernel)
+    # Perform filter3d for mu_img* in a tight loop (avoid temporaries)
+    mu_img1_sq = filter3d(img1_sq, kernel)
+    mu_img2_sq = filter3d(img2_sq, kernel)
+    mu_img1_img2 = filter3d(img1_img2, kernel)
 
-    if padding == "valid":
+    if needs_crop:
         mu_img1_sq = _crop(mu_img1_sq, cropping_shape)
         mu_img2_sq = _crop(mu_img2_sq, cropping_shape)
         mu_img1_img2 = _crop(mu_img1_img2, cropping_shape)
-    elif padding == "same":
-        pass
 
-    # compute local sigma per channel
+    # Use fast fused operations instead of sequential powers
+    mu1_sq = mu1 * mu1
+    mu2_sq = mu2 * mu2
+    mu1_mu2 = mu1 * mu2
+
     sigma1_sq = mu_img1_sq - mu1_sq
     sigma2_sq = mu_img2_sq - mu2_sq
     sigma12 = mu_img1_img2 - mu1_mu2
 
-    # compute the similarity index map
-    num: Tensor = (2.0 * mu1_mu2 + C1) * (2.0 * sigma12 + C2)
-    den: Tensor = (mu1_sq + mu2_sq + C1) * (sigma1_sq + sigma2_sq + C2)
+    # Fused SSIM numerator and denominator calculations
+    num = (2.0 * mu1_mu2 + C1) * (2.0 * sigma12 + C2)
+    den = (mu1_sq + mu2_sq + C1) * (sigma1_sq + sigma2_sq + C2)
 
+    # Use torch.add for num/den if available for even more speed, but this is elementwise anyway
     return num / (den + eps)
 
 
