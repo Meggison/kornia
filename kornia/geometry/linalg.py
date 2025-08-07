@@ -93,14 +93,14 @@ def compose_transformations(trans_01: Tensor, trans_12: Tensor) -> Tensor:
 def inverse_transformation(trans_12: Tensor) -> Tensor:
     r"""Invert a 4x4 homogeneous transformation.
 
-     :math:`T_1^{2} = \begin{bmatrix} R_1 & t_1 \\ \\mathbf{0} & 1 \\end{bmatrix}`
+     :math:`T_1^{2} = \begin{bmatrix} R_1 & t_1 \\ \mathbf{0} & 1 \end{bmatrix}`
 
     The inverse transformation is computed as follows:
 
     .. math::
 
         T_2^{1} = (T_1^{2})^{-1} = \begin{bmatrix} R_1^T & -R_1^T t_1 \\
-        \\mathbf{0} & 1\\end{bmatrix}
+        \mathbf{0} & 1\end{bmatrix}
 
     Args:
         trans_12: transformation tensor of shape :math:`(N, 4, 4)` or :math:`(4, 4)`.
