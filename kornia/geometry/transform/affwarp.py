@@ -19,15 +19,17 @@ import warnings
 from typing import Optional, Tuple, Union
 
 import torch
+from torch import Tensor
 
 from kornia.core import ImageModule as Module
-from kornia.core import Tensor, ones, ones_like, zeros
+from kornia.core import Module, Tensor, ones, ones_like, zeros
 from kornia.filters import gaussian_blur2d
 from kornia.utils import _extract_device_dtype
 from kornia.utils.image import perform_keep_shape_image
 from kornia.utils.misc import eye_like
 
-from .imgwarp import get_affine_matrix2d, get_projective_transform, get_rotation_matrix2d, warp_affine, warp_affine3d
+from .imgwarp import (get_affine_matrix2d, get_projective_transform,
+                      get_rotation_matrix2d, warp_affine, warp_affine3d)
 
 __all__ = [
     "Affine",
@@ -555,7 +557,7 @@ def resize(
     side: str = "short",
     antialias: bool = False,
 ) -> Tensor:
-    r"""Resize the input Tensor to the given size.
+    """Resize the input Tensor to the given size.
 
     .. image:: _static/img/resize.png
 
@@ -590,7 +592,8 @@ def resize(
     if len(input.shape) < 2:
         raise ValueError(f"Input tensor must have at least two dimensions. Got {len(input.shape)}")
 
-    input_size = h, w = input.shape[-2:]
+    h, w = input.shape[-2:]
+    input_size = (h, w)
     if isinstance(size, int):
         if torch.onnx.is_in_onnx_export():
             warnings.warn(
@@ -599,34 +602,32 @@ def resize(
         aspect_ratio = w / h
         size = _side_to_image_size(size, aspect_ratio, side)
 
-    # Skip this dangerous if-else when converting to ONNX.
-    if not torch.onnx.is_in_onnx_export():
-        if size == input_size:
-            return input
+    # Fast path: skip additional computation if no resizing is needed and not in ONNX export
+    if not torch.onnx.is_in_onnx_export() and (size[0] == h and size[1] == w):
+        return input
 
-    factors = (h / size[0], w / size[1])
+    factors_h = h / size[0]
+    factors_w = w / size[1]
 
-    # We do bluring only for downscaling
-    antialias = antialias and (max(factors) > 1)
+    # Only blur if downscaling
+    apply_antialias = antialias and (max(factors_h, factors_w) > 1)
 
-    if antialias:
-        # First, we have to determine sigma
-        # Taken from skimage: https://github.com/scikit-image/scikit-image/blob/v0.19.2/skimage/transform/_warps.py#L171
-        sigmas = (max((factors[0] - 1.0) / 2.0, 0.001), max((factors[1] - 1.0) / 2.0, 0.001))
+    if apply_antialias:
+        # Vectorized sigma, clamp to minimum of 0.001 for stability
+        sigma0 = max((factors_h - 1.0) * 0.5, 0.001)
+        sigma1 = max((factors_w - 1.0) * 0.5, 0.001)
 
-        # Now kernel size. Good results are for 3 sigma, but that is kind of slow. Pillow uses 1 sigma
-        # https://github.com/python-pillow/Pillow/blob/master/src/libImaging/Resample.c#L206
-        # But they do it in the 2 passes, which gives better results. Let's try 2 sigmas for now
-        ks = int(max(2.0 * 2 * sigmas[0], 3)), int(max(2.0 * 2 * sigmas[1], 3))
+        # Kernel sizes: minimum 3, preferred ~4.0*sigma+1 & must be odd
+        ks0 = int(max(round(4.0 * sigma0), 3))
+        if ks0 % 2 == 0:
+            ks0 += 1
+        ks1 = int(max(round(4.0 * sigma1), 3))
+        if ks1 % 2 == 0:
+            ks1 += 1
+        kernel_size = (ks0, ks1)
+        sigmas = (sigma0, sigma1)
 
-        # Make sure it is odd
-        if (ks[0] % 2) == 0:
-            ks = ks[0] + 1, ks[1]
-
-        if (ks[1] % 2) == 0:
-            ks = ks[0], ks[1] + 1
-
-        input = gaussian_blur2d(input, ks, sigmas)
+        input = gaussian_blur2d(input, kernel_size, sigmas)
 
     output = torch.nn.functional.interpolate(input, size=size, mode=interpolation, align_corners=align_corners)
     return output
