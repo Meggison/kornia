@@ -19,6 +19,7 @@ from functools import wraps
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import torch
+from line_profiler import profile as codeflash_line_profile
 from torch.distributions import Beta, Uniform
 
 from kornia.core import Tensor, as_tensor
@@ -101,6 +102,7 @@ def _infer_batch_shape3d(input: Union[Tensor, Tuple[Tensor, Tensor]]) -> torch.S
     return tensor.shape
 
 
+@codeflash_line_profile
 def _transform_input_by_shape(input: Tensor, reference_shape: Tensor, match_channel: bool = True) -> Tensor:
     """Reshape an input tensor to have the same dimensions as the reference_shape.
 
@@ -159,6 +161,7 @@ def _transform_input3d_by_shape(input: Tensor, reference_shape: Tensor, match_ch
     return input
 
 
+@codeflash_line_profile
 def _transform_input(input: Tensor) -> Tensor:
     r"""Reshape an input tensor to be (*, C, H, W). Accept either (H, W), (C, H, W) or (*, C, H, W).
 
@@ -211,6 +214,7 @@ def _transform_input3d(input: Tensor) -> Tensor:
     return input
 
 
+@codeflash_line_profile
 def _validate_input_dtype(input: Tensor, accepted_dtypes: List[torch.dtype]) -> None:
     r"""Check if the dtype of the input tensor is in the range of accepted_dtypes.
 
