@@ -264,7 +264,9 @@ def batched_dot_product(x: Tensor, y: Tensor, keepdim: bool = False) -> Tensor:
 
 def batched_squared_norm(x: Tensor, keepdim: bool = False) -> Tensor:
     """Return the squared norm of a vector."""
-    return batched_dot_product(x, x, keepdim)
+    KORNIA_CHECK_SHAPE(x, ["*", "N"])
+    # Avoids one function call overhead
+    return (x * x).sum(dim=-1, keepdim=keepdim)
 
 
 def euclidean_distance(x: Tensor, y: Tensor, keepdim: bool = False, eps: float = 1e-6) -> Tensor:
