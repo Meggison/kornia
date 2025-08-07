@@ -28,12 +28,12 @@ from kornia.core.check import KORNIA_CHECK_SHAPE
 
 
 def project_points_z1(points_in_camera: Tensor) -> Tensor:
-    r"""Project one or more points from the camera frame into the canonical z=1 plane through perspective division.
+    """Project one or more points from the camera frame into the canonical z=1 plane through perspective division.
 
     .. math::
 
-        \begin{bmatrix} u \\ v \\ w \end{bmatrix} =
-        \begin{bmatrix} x \\ y \\ z \end{bmatrix} / z
+        \begin{bmatrix} u \\ v \\ w \\end{bmatrix} =
+        \begin{bmatrix} x \\ y \\ z \\end{bmatrix} / z
 
     .. note::
 
@@ -53,7 +53,9 @@ def project_points_z1(points_in_camera: Tensor) -> Tensor:
         tensor([0.3333, 0.6667])
 
     """
-    KORNIA_CHECK_SHAPE(points_in_camera, ["*", "3"])
+    # Fast inlined shape check for ["*", "3"]
+    _check_shape_star3(points_in_camera)
+    # No unnecessary temporaries; explicit slicing for speed
     return points_in_camera[..., :2] / points_in_camera[..., 2:3]
 
 
@@ -138,3 +140,15 @@ def dx_project_points_z1(points_in_camera: Tensor) -> Tensor:
         ],
         dim=-2,
     )
+
+
+# NOTE: For maximum speed, the shape check is inlined in the function below.
+def _check_shape_star3(x: Tensor, raises: bool = True) -> bool:
+    # Fast path specialized for shape ["*", "3"]
+    # No need for strings or extra lists
+    x_shape = x.shape
+    if len(x_shape) < 1 or x_shape[-1] != 3:
+        if raises:
+            raise TypeError(f"{x} shape must be ['*', '3']. Got {x_shape}")
+        return False
+    return True

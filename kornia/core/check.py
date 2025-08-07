@@ -26,6 +26,8 @@ from typing_extensions import TypeGuard
 
 from kornia.core import Tensor
 
+"""The testing package contains testing-specific utilities."""
+
 __all__ = [
     "KORNIA_CHECK",
     "KORNIA_CHECK_DM_DESC",
@@ -464,3 +466,15 @@ def _handle_invalid_range(msg: Optional[str], raises: bool, min_val: float | Ten
     if raises:
         raise ValueError(err_msg)
     return False
+
+
+# NOTE: For maximum speed, the shape check is inlined in the function below.
+def _check_shape_star3(x: Tensor, raises: bool = True) -> bool:
+    # Fast path specialized for shape ["*", "3"]
+    # No need for strings or extra lists
+    x_shape = x.shape
+    if len(x_shape) < 1 or x_shape[-1] != 3:
+        if raises:
+            raise TypeError(f"{x} shape must be ['*', '3']. Got {x_shape}")
+        return False
+    return True
