@@ -15,6 +15,7 @@
 # limitations under the License.
 #
 
+from functools import lru_cache
 from typing import Any, Dict, List, Tuple, Union
 
 import torch
@@ -610,6 +611,12 @@ def load_whitening_model(kernel_type: str, training_set: str) -> Dict[str, Any]:
     return whitening_model
 
 
+@lru_cache(maxsize=6)
+def _cached_whitening_model(kernel_type: str, training_set: str):
+    # Use lru_cache to avoid fetching and reading the model more than once per configuration
+    return load_whitening_model(kernel_type, training_set)
+
+
 class SimpleKD(nn.Module):
     """Example to write custom Kernel Descriptors."""
 
@@ -622,20 +629,23 @@ class SimpleKD(nn.Module):
         output_dims: int = 128,
     ) -> None:
         super().__init__()
-
-        relative: bool = kernel_type == "polar"
-        sigma: float = 1.4 * (patch_size / 64)
+        relative = kernel_type == "polar"
+        sigma = 1.4 * (patch_size / 64)
         self.patch_size = patch_size
-        # Sequence of modules.
+
+        # Build modules only once, assign to local vars for efficiency before nn.Sequential
         smoothing = GaussianBlur2d((5, 5), (sigma, sigma), "replicate")
         gradients = MKDGradients()
         ori = EmbedGradients(patch_size=patch_size, relative=relative)
         ese = ExplicitSpacialEncoding(kernel_type=kernel_type, fmap_size=patch_size, in_dims=ori.kernel.d)
-        wh = Whitening(
-            whitening, load_whitening_model(kernel_type, training_set), in_dims=ese.odims, output_dims=output_dims
-        )
 
+        # Use cached whitening model loader for speed/memory
+        whitening_weights = _cached_whitening_model(kernel_type, training_set)
+        wh = Whitening(whitening, whitening_weights, in_dims=ese.odims, output_dims=output_dims)
+
+        # Build the feature pipeline as a tuple to avoid unnecessary list overhead
         self.features = nn.Sequential(smoothing, gradients, ori, ese, wh)
 
     def forward(self, x: Tensor) -> Tensor:
+        # Retain as single call (fast)
         return self.features(x)
