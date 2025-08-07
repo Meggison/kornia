@@ -76,15 +76,32 @@ class RaySampler:
     def _calc_ray_directions_cam(self, cameras: PinholeCamera, points_2d: Tensor) -> Tensor:
         # FIXME: This function should call perspective.unproject_points or, implement in PinholeCamera unproject to
         # camera coordinates that will call perspective.unproject_points
+
+        # Use local vars to avoid repeated attribute access and possible broadcasting pitfalls
         fx = cameras.fx
         fy = cameras.fy
         cx = cameras.cx
         cy = cameras.cy
-        directions_x = (points_2d[..., 0] - cx[..., None]) / fx[..., None]
-        directions_y = (points_2d[..., 1] - cy[..., None]) / fy[..., None]
-        directions_z = torch.ones_like(directions_x)
-        directions_cam = torch.stack([directions_x, directions_y, directions_z], dim=-1)
-        return directions_cam.reshape(-1, 3)
+
+        # Prepare view with minimal allocations & broadcasting
+        # We avoid torch.ones_like for directions_z and torch.stack for better memory and runtime efficiency
+        x = points_2d[..., 0]
+        y = points_2d[..., 1]
+
+        # Use efficient broadcasting via torch.sub and torch.div
+        dx = torch.sub(x, cx[..., None])
+        dx.div_(fx[..., None])
+        dy = torch.sub(y, cy[..., None])
+        dy.div_(fy[..., None])
+
+        # Efficient allocation: directly build target array
+        shape = dx.shape
+        out = points_2d.new_empty(shape + (3,))
+        out[..., 0] = dx
+        out[..., 1] = dy
+        out[..., 2] = 1.0  # z-direction is always 1.0
+
+        return out.reshape(-1, 3)
 
     class Points2D:
         r"""A class to hold ray 2d pixel coordinates and a camera id for each.
