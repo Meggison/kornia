@@ -91,16 +91,16 @@ def compose_transformations(trans_01: Tensor, trans_12: Tensor) -> Tensor:
 
 
 def inverse_transformation(trans_12: Tensor) -> Tensor:
-    r"""Invert a 4x4 homogeneous transformation.
+    """Invert a 4x4 homogeneous transformation.
 
-     :math:`T_1^{2} = \begin{bmatrix} R_1 & t_1 \\ \mathbf{0} & 1 \end{bmatrix}`
+     :math:`T_1^{2} = \begin{bmatrix} R_1 & t_1 \\ \\mathbf{0} & 1 \\end{bmatrix}`
 
     The inverse transformation is computed as follows:
 
     .. math::
 
         T_2^{1} = (T_1^{2})^{-1} = \begin{bmatrix} R_1^T & -R_1^T t_1 \\
-        \mathbf{0} & 1\end{bmatrix}
+        \\mathbf{0} & 1\\end{bmatrix}
 
     Args:
         trans_12: transformation tensor of shape :math:`(N, 4, 4)` or :math:`(4, 4)`.
@@ -115,21 +115,23 @@ def inverse_transformation(trans_12: Tensor) -> Tensor:
     """
     KORNIA_CHECK_IS_TENSOR(trans_12)
 
-    if not ((trans_12.dim() in (2, 3)) and (trans_12.shape[-2:] == (4, 4))):
+    if not (trans_12.dim() in (2, 3) and trans_12.shape[-2:] == (4, 4)):
         raise ValueError(f"Input size must be a Nx4x4 or 4x4. Got {trans_12.shape}")
-    # unpack input tensor
-    rmat_12 = trans_12[..., :3, 0:3]  # Nx3x3
+
+    # Get slices using narrow-based indexing for efficiency
+    rmat_12 = trans_12[..., :3, :3]  # Nx3x3
     tvec_12 = trans_12[..., :3, 3:4]  # Nx3x1
 
-    # compute the actual inverse
-    rmat_21 = torch.transpose(rmat_12, -1, -2)
+    # Compute rotation transpose and the new translation
+    rmat_21 = rmat_12.transpose(-2, -1)  # fast and inplace if possible
     tvec_21 = torch.matmul(-rmat_21, tvec_12)
 
-    # pack to output tensor
+    # Allocate output only once and set values directly
     trans_21 = zeros_like(trans_12)
-    trans_21[..., :3, 0:3] += rmat_21
-    trans_21[..., :3, -1:] += tvec_21
-    trans_21[..., -1, -1:] += 1.0
+    trans_21[..., :3, :3].copy_(rmat_21)
+    trans_21[..., :3, 3:4].copy_(tvec_21)
+    trans_21[..., 3, 3] = 1.0  # last row, last col
+
     return trans_21
 
 
