@@ -238,7 +238,7 @@ class RaySampler:
     def _build_num_ray_dict_of_points2d(
         points2d_as_flat_tensors: Dict[int, Points2D_FlatTensors],
     ) -> Dict[int, Points2D]:
-        r"""Build a dictionary of ray pixel points, by total number of rays as key.
+        """Build a dictionary of ray pixel points, by total number of rays as key.
 
         The dictionary groups rays by the total amount of rays, which allows the case of casting different number
         of rays from each scene camera.
@@ -252,15 +252,13 @@ class RaySampler:
               id it was casted by: Dict[int, Points2D]
 
         """
-        num_ray_dict_of_points2d: Dict[int, RaySampler.Points2D] = {}
-        for n, points2d_as_flat_tensor in points2d_as_flat_tensors.items():
-            num_cams = len(points2d_as_flat_tensor._camera_ids)
-            points_2d = (
-                torch.stack((points2d_as_flat_tensor._x, points2d_as_flat_tensor._y))
-                .permute(1, 0)
-                .reshape(num_cams, -1, 2)
-            )
-            num_ray_dict_of_points2d[n] = RaySampler.Points2D(points_2d, points2d_as_flat_tensor._camera_ids)
+        num_ray_dict_of_points2d = {}
+        for n, flat in points2d_as_flat_tensors.items():
+            # Compute number of cameras from length of camera_ids _once_
+            num_cams = flat._camera_ids.shape[0] if hasattr(flat._camera_ids, "shape") else len(flat._camera_ids)
+            # Efficient stacking - stack x/y along dim=1 for direct [num_rays,2] shape, then reshape to [num_cams,-1,2]
+            points_2d = torch.stack((flat._x, flat._y), dim=1).reshape(num_cams, -1, 2)
+            num_ray_dict_of_points2d[n] = RaySampler.Points2D(points_2d, flat._camera_ids)
         return num_ray_dict_of_points2d
 
 
