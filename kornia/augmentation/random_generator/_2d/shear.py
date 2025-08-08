@@ -88,20 +88,27 @@ class ShearGenerator(RandomGeneratorBase):
 
     def forward(self, batch_shape: Tuple[int, ...], same_on_batch: bool = False) -> Dict[str, Tensor]:
         batch_size = batch_shape[0]
-        height = batch_shape[-2]
-        width = batch_shape[-1]
+        height, width = batch_shape[-2], batch_shape[-1]
 
         _device, _dtype = _extract_device_dtype([self.shear])
         _common_param_check(batch_size, same_on_batch)
-        if not (isinstance(width, (int,)) and isinstance(height, (int,)) and width > 0 and height > 0):
+
+        if not (isinstance(width, int) and isinstance(height, int) and width > 0 and height > 0):
             raise AssertionError(f"`width` and `height` must be positive integers. Got {width}, {height}.")
 
-        center: Tensor = tensor([width, height], device=_device, dtype=_dtype).view(1, 2) / 2.0 - 0.5
-        center = center.expand(batch_size, -1)
+        # Compute center only if used, use expand only for batch_size > 1.
+        center = tensor([width, height], device=_device, dtype=_dtype).div(2.0).sub(0.5)
+        if batch_size != 1:
+            center = center.expand(batch_size, 2)
+        else:
+            center = center.view(1, 2)
 
+        # Sample shears efficiently. If sampler returns correct dtype/device, skip .to()
         sx = _adapted_rsampling((batch_size,), self.shear_x_sampler, same_on_batch)
         sy = _adapted_rsampling((batch_size,), self.shear_y_sampler, same_on_batch)
-        sx = sx.to(device=_device, dtype=_dtype)
-        sy = sy.to(device=_device, dtype=_dtype)
+        if sx.device != _device or sx.dtype != _dtype:
+            sx = sx.to(device=_device, dtype=_dtype)
+        if sy.device != _device or sy.dtype != _dtype:
+            sy = sy.to(device=_device, dtype=_dtype)
 
         return {"center": center, "shear_x": sx, "shear_y": sy}
