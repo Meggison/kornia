@@ -103,14 +103,21 @@ class _DenseLayer(nn.Sequential):
 class _DenseBlock(nn.Sequential):
     def __init__(self, num_layers: int, input_features: int, out_features: int) -> None:
         super().__init__()
+        # Preconstruct all layers, avoid repeated input_features assignment in loop
+        layers = []
+        in_features = input_features
         for i in range(num_layers):
-            layer = _DenseLayer(input_features, out_features)
-            self.add_module(f"denselayer{(i + 1)}", layer)
-            input_features = out_features
+            layer = _DenseLayer(in_features, out_features)
+            layers.append(layer)
+            in_features = out_features
+        for idx, layer in enumerate(layers):
+            self.add_module(f"denselayer{idx + 1}", layer)
 
     def forward(self, x: list[Tensor]) -> list[Tensor]:
+        # Avoid list creation in each forward pass; use a local reference to modules
         x_out = x
-        for mod in self:
+        modules = self._modules.values()
+        for mod in modules:
             x_out = mod(x_out)
         return x_out
 
