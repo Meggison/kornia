@@ -19,7 +19,6 @@
 
 from __future__ import annotations
 
-from collections import OrderedDict
 from typing import ClassVar, Optional
 
 import torch
@@ -79,24 +78,25 @@ class CoFusion(Module):
 
 class _DenseLayer(nn.Sequential):
     def __init__(self, input_features: int, out_features: int) -> None:
-        super().__init__(
-            OrderedDict(
-                [
-                    ("relu1", nn.ReLU(inplace=True)),
-                    ("conv1", nn.Conv2d(input_features, out_features, kernel_size=3, stride=1, padding=2, bias=True)),
-                    ("norm1", nn.BatchNorm2d(out_features)),
-                    ("relu2", nn.ReLU(inplace=True)),
-                    ("conv2", nn.Conv2d(out_features, out_features, kernel_size=3, stride=1, bias=True)),
-                    ("norm2", nn.BatchNorm2d(out_features)),
-                ]
-            )
-        )
+        super().__init__()
+        # Remove OrderedDict, instantiate modules directly for faster lookup
+        self.relu1 = nn.ReLU(inplace=True)
+        self.conv1 = nn.Conv2d(input_features, out_features, kernel_size=3, stride=1, padding=2, bias=True)
+        self.norm1 = nn.BatchNorm2d(out_features)
+        self.relu2 = nn.ReLU(inplace=True)
+        self.conv2 = nn.Conv2d(out_features, out_features, kernel_size=3, stride=1, bias=True)
+        self.norm2 = nn.BatchNorm2d(out_features)
 
     def forward(self, x: list[Tensor]) -> list[Tensor]:
+        # Unpack the input list
         x1, x2 = x[0], x[1]
-        x3: Tensor = x1
-        for mod in self:
-            x3 = mod(x3)
+        # Inline all layer calls for speed
+        x3 = self.relu1(x1)
+        x3 = self.conv1(x3)
+        x3 = self.norm1(x3)
+        x3 = self.relu2(x3)
+        x3 = self.conv2(x3)
+        x3 = self.norm2(x3)
         return [0.5 * (x3 + x2), x2]
 
 
