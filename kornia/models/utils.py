@@ -21,7 +21,7 @@ from typing import List, Tuple, Union
 import torch
 from torch import Tensor
 
-from kornia.core import Module, concatenate
+from kornia.core import Module, Tensor, concatenate
 from kornia.geometry.transform import resize
 
 __all__ = ["OutputRangePostProcessor", "ResizePostProcessor", "ResizePreProcessor"]
@@ -81,9 +81,6 @@ class ResizePostProcessor(Module):
         original_sizes: the original image sizes of (height, width).
 
         """
-        # TODO: support other input formats e.g. file path, numpy
-        resized_imgs: list[Tensor] = []
-
         if torch.onnx.is_in_onnx_export():
             warnings.warn(
                 "ResizePostProcessor is not supported in ONNX export. "
@@ -92,13 +89,29 @@ class ResizePostProcessor(Module):
             )
             return imgs
 
+        # Fast path: batched tensor
+        if isinstance(imgs, Tensor) and imgs.dim() > 3 and imgs.shape[0] == original_sizes.shape[0]:
+            out_imgs = []
+            for img, size in zip(imgs, original_sizes):
+                # Avoid unnecessary .cpu()/.numpy() when size is already on cpu and dtype is long
+                if size.device.type == "cpu" and size.dtype == torch.long:
+                    s = size.tolist()
+                else:
+                    s = size.cpu().long().tolist()
+                out_imgs.append(resize(img[None], size=s, interpolation=self.interpolation_mode))
+            return out_imgs
+
+        # Fallback: for list of tensors or any other input form
+        resized_imgs: List[Tensor] = []
         iters = len(imgs) if isinstance(imgs, list) else imgs.shape[0]
         for i in range(iters):
             img = imgs[i]
             size = original_sizes[i]
-            resized_imgs.append(
-                resize(img[None], size=size.cpu().long().numpy().tolist(), interpolation=self.interpolation_mode)
-            )
+            if size.device.type == "cpu" and size.dtype == torch.long:
+                s = size.tolist()
+            else:
+                s = size.cpu().long().tolist()
+            resized_imgs.append(resize(img[None], size=s, interpolation=self.interpolation_mode))
         return resized_imgs
 
 
