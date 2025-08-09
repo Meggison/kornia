@@ -272,8 +272,8 @@ class Detector_config(TypedDict):
 
 def get_default_detector_config() -> Detector_config:
     """Return default config."""
-    # Return a shallow copy to ensure modifications outside don't affect the module-level config.
-    return _DEFAULT_DETECTOR_CONFIG.copy()
+    # Use dict() constructor which is marginally faster for copying shallow dicts.
+    return dict(_DEFAULT_DETECTOR_CONFIG)
 
 
 class MultiResolutionDetector(Module):
