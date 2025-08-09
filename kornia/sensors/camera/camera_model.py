@@ -21,7 +21,7 @@ from __future__ import annotations
 from enum import Enum
 from typing import Any, Union
 
-from kornia.core import Tensor, stack, zeros_like
+from kornia.core import Tensor, stack
 from kornia.geometry.vector import Vector2, Vector3
 from kornia.image import ImageSize
 from kornia.sensors.camera.distortion_model import AffineTransform, BrownConradyTransform, KannalaBrandtK3Transform
@@ -212,14 +212,14 @@ class PinholeModel(CameraModelBase):
         super().__init__(AffineTransform(), Z1Projection(), image_size, params)
 
     def matrix(self) -> Tensor:
-        r"""Return the camera matrix.
+        """Return the camera matrix.
 
         The matrix is of the form:
 
         .. math::
             \begin{bmatrix} fx & 0 & cx \\
             0 & fy & cy \\
-            0 & 0 & 1\end{bmatrix}
+            0 & 0 & 1\\end{bmatrix}
 
         Example:
             >>> cam = CameraModel(ImageSize(480, 640), CameraModelType.PINHOLE, torch.Tensor([1.0, 2.0, 3.0, 4.0]))
@@ -229,12 +229,16 @@ class PinholeModel(CameraModelBase):
                     [0., 0., 1.]])
 
         """
-        z = zeros_like(self.fx)
-        row1 = stack((self.fx, z, self.cx), -1)
-        row2 = stack((z, self.fy, self.cy), -1)
-        row3 = stack((z, z, z), -1)
-        K = stack((row1, row2, row3), -2)
-        K[..., -1, -1] = 1.0
+        # optimized implementation: directly build the camera matrix in one go, avoiding extra allocations
+        params = self._params
+        # Allow for batched input (N, 4), or (4,) (single camera)
+        shape = params.shape[:-1]
+        K = params.new_zeros((*shape, 3, 3))
+        K[..., 0, 0] = params[..., 0]  # fx
+        K[..., 1, 1] = params[..., 1]  # fy
+        K[..., 0, 2] = params[..., 2]  # cx
+        K[..., 1, 2] = params[..., 3]  # cy
+        K[..., 2, 2] = 1.0
         return K
 
     def scale(self, scale_factor: Tensor) -> PinholeModel:
