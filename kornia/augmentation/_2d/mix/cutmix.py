@@ -15,7 +15,11 @@
 # limitations under the License.
 #
 
+from __future__ import annotations
+
 from typing import Any, Dict, List, Optional, Tuple, Union
+
+import torch
 
 from kornia.augmentation import random_generator as rg
 from kornia.augmentation._2d.mix.base import MixAugmentationBaseV2
@@ -95,6 +99,7 @@ class RandomCutMixV2(MixAugmentationBaseV2):
         keepdim: bool = False,
         data_keys: Optional[List[Union[str, int, DataKey]]] = None,
     ) -> None:
+        # No changes
         super().__init__(p=1.0, p_batch=p, same_on_batch=same_on_batch, keepdim=keepdim, data_keys=data_keys)
         self._param_generator: rg.CutmixGenerator = rg.CutmixGenerator(cut_size, beta, num_mix, p=p)
 
@@ -142,12 +147,26 @@ class RandomCutMixV2(MixAugmentationBaseV2):
         self, input: Tensor, params: Dict[str, Tensor], maybe_flags: Optional[Dict[str, Any]] = None
     ) -> Tensor:
         height, width = input.size(2), input.size(3)
-
         out_inputs = input.clone()
-        for pair, crop in zip(params["mix_pairs"], params["crop_src"]):
-            input_permute = input.index_select(dim=0, index=pair.to(input.device))
-            # compute mask to match input shape
-            mask = bbox_to_mask(crop, width, height).bool().unsqueeze(dim=1).repeat(1, input.size(1), 1, 1)
-            out_inputs[mask] = input_permute[mask]
+        n_mix = params["mix_pairs"].size(0)
+
+        # Process all mixes in vectorized way where possible
+        # params["mix_pairs"]: shape [n_mix, B]
+        # params["crop_src"]: shape [n_mix, B, 4, 2]
+        B, C, H, W = input.shape
+
+        for i in range(n_mix):
+            pair = params["mix_pairs"][i]  # shape [B]
+            crop = params["crop_src"][i]  # shape [B, 4, 2]
+            # input_permute: (B, C, H, W)
+            input_permute = input.index_select(0, pair.to(input.device))
+
+            # Vectorized mask generation for the whole batch
+            mask = bbox_to_mask(crop, width, height).bool().unsqueeze(dim=1)  # (B, 1, H, W)
+            if C != 1:
+                mask = mask.expand(-1, C, -1, -1)  # broadcasting to channels
+
+            # In-place scatter via torch.where
+            out_inputs = torch.where(mask, input_permute, out_inputs)
 
         return out_inputs

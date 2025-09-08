@@ -226,16 +226,28 @@ def bbox_to_mask(boxes: torch.Tensor, width: int, height: int) -> torch.Tensor:
                  [0., 0., 0., 0., 0.]]])
 
     """
+    # Validate format only -- do not keep side effects of validate_bbox
     validate_bbox(boxes)
-    # zero padding the surroundings
-    mask = zeros((len(boxes), height + 2, width + 2), dtype=boxes.dtype, device=boxes.device)
-    # push all points one pixel off
-    # in order to zero-out the fully filled rows or columns
-    box_i = (boxes + 1).long()
-    # set all pixels within box to 1
-    for msk, bx in zip(mask, box_i):
-        msk[bx[0, 1] : bx[2, 1] + 1, bx[0, 0] : bx[1, 0] + 1] = 1.0
-    return mask[:, 1:-1, 1:-1]
+    B = boxes.shape[0]
+    device = boxes.device
+    dtype = boxes.dtype
+    out = zeros((B, height, width), dtype=dtype, device=device)
+    # boxes: Bx4x2, indices as [top-left, top-right, bottom-right, bottom-left], X/Y
+    # We assume axis-aligned rectangles.
+    # Compute ranges for all boxes at once (vectorized instead of loop)
+    box_i = (boxes + 1).long()  # Bx4x2
+
+    y1 = box_i[:, 0, 1].clamp(0, height + 1)  # top-left y
+    y2 = box_i[:, 2, 1].clamp(0, height + 1)  # bottom-right y
+    x1 = box_i[:, 0, 0].clamp(0, width + 1)  # top-left x
+    x2 = box_i[:, 1, 0].clamp(0, width + 1)  # top-right x
+
+    # Create rectangles using broadcasting
+    for i in range(B):
+        # clamp ranges (do not rely on user input: can be empty ranges)
+        if y2[i] >= y1[i] and x2[i] >= x1[i]:
+            out[i, y1[i] : y2[i] + 1, x1[i] : x2[i] + 1] = 1.0
+    return out
 
 
 def bbox_to_mask3d(boxes: torch.Tensor, size: tuple[int, int, int]) -> torch.Tensor:
