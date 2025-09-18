@@ -1,4 +1,5 @@
 name: Setup Kornia dev environment
+description: "Set up Python, PyTorch, and dependencies for Kornia development"
 
 inputs:
   python-version:
@@ -29,7 +30,7 @@ inputs:
 runs:
   using: "composite"
   steps:
-    - uses: asottile/workflows/.github/actions/fast-checkout@v1.6.0
+    - uses: actions/checkout@v4
       with:
         repository: kornia/kornia
         ref: ${{ inputs.ref }}
