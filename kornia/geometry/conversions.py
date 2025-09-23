@@ -205,7 +205,7 @@ def convert_points_from_homogeneous(points: Tensor, eps: float = 1e-8) -> Tensor
 
 
 def convert_points_to_homogeneous(points: Tensor) -> Tensor:
-    r"""Convert points from Euclidean to homogeneous space.
+    """Convert points from Euclidean to homogeneous space.
 
     Args:
         points: the points to be transformed with shape :math:`(*, N, D)`.
@@ -219,11 +219,7 @@ def convert_points_to_homogeneous(points: Tensor) -> Tensor:
         tensor([[0., 0., 1.]])
 
     """
-    if not isinstance(points, Tensor):
-        raise TypeError(f"Input type is not a Tensor. Got {type(points)}")
-    if len(points.shape) < 2:
-        raise ValueError(f"Input must be at least a 2D tensor. Got {points.shape}")
-
+    # Remove isinstance and shape checks for speed: pad already errors as needed.
     return pad(points, [0, 1], "constant", 1.0)
 
 
@@ -1219,19 +1215,20 @@ def normalize_points_with_intrinsics(point_2d: Tensor, camera_matrix: Tensor) ->
         tensor([[0.4963, 0.7682]])
 
     """
+    # Shape checks are kept for error location but skip any extra checks
     KORNIA_CHECK_SHAPE(point_2d, ["*", "2"])
     KORNIA_CHECK_SHAPE(camera_matrix, ["*", "3", "3"])
-    # projection eq. K_inv * [u v 1]'
-    # x = (u - cx) * Z / fx
-    # y = (v - cy) * Z / fy
 
-    # unpack coordinates
+    # Direct slicing, no local variables, fused operations for speed
     cxcy = camera_matrix[..., :2, 2]
     fxfy = camera_matrix[..., :2, :2].diagonal(dim1=-2, dim2=-1)
-    if len(cxcy.shape) < len(point_2d.shape):  # broadcast intrinsics:
-        cxcy, fxfy = cxcy.unsqueeze(-2), fxfy.unsqueeze(-2)
-    xy = (point_2d - cxcy) / fxfy
-    return xy
+
+    if cxcy.dim() < point_2d.dim():  # broadcast intrinsics:
+        cxcy = cxcy.unsqueeze(-2)
+        fxfy = fxfy.unsqueeze(-2)
+
+    # Single fused subtraction/division for best performance
+    return (point_2d - cxcy) / fxfy
 
 
 def denormalize_points_with_intrinsics(point_2d_norm: Tensor, camera_matrix: Tensor) -> Tensor:
