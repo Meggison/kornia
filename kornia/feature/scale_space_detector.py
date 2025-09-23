@@ -298,7 +298,7 @@ class MultiResolutionDetector(Module):
         self,
         model: Module,
         num_features: int = 2048,
-        config: Optional[Detector_config] = None,
+        config: Optional["Detector_config"] = None,
         ori_module: Optional[Module] = None,
         aff_module: Optional[Module] = None,
     ) -> None:
@@ -327,9 +327,11 @@ class MultiResolutionDetector(Module):
 
     def remove_borders(self, score_map: Tensor, borders: int = 15) -> Tensor:
         """Remove the borders of the image to avoid detections on the corners."""
-        mask = torch.zeros_like(score_map)
-        mask[:, :, borders:-borders, borders:-borders] = 1
-        return mask * score_map
+        # Only mask the inside region rather than create a full mask tensor
+        result = torch.zeros_like(score_map)
+        if score_map.shape[2] > 2 * borders and score_map.shape[3] > 2 * borders:
+            result[:, :, borders:-borders, borders:-borders] = score_map[:, :, borders:-borders, borders:-borders]
+        return result
 
     def detect_features_on_single_level(
         self, level_img: Tensor, num_kp: int, factor: Tuple[float, float]
