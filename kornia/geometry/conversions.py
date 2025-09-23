@@ -1576,3 +1576,18 @@ def vector_to_skew_symmetric_matrix(vec: Tensor) -> Tensor:
         [stack([zeros, -v3, v2], dim=-1), stack([v3, zeros, -v1], dim=-1), stack([-v2, v1, zeros], dim=-1)], dim=-2
     )
     return skew_symmetric_matrix
+
+
+# Optimized fast path for numeric shape checks (used by downstream)
+def _fast_numeric_shape_match(tensor_shape, pattern):
+    # Pattern: e.g. ["B","N",2], ["B",3]
+    if len(tensor_shape) != len(pattern):
+        return False
+    for t, p in zip(tensor_shape, pattern):
+        if isinstance(p, int):
+            if t != p:
+                return False
+        elif p.isnumeric():
+            if t != int(p):
+                return False
+    return True
