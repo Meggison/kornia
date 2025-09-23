@@ -16,6 +16,7 @@
 #
 
 from functools import wraps
+from functools import wraps as _builtin_wraps
 from typing import Any, Callable, List, Optional
 
 import torch
@@ -330,26 +331,23 @@ def perform_keep_shape_video(f: Callable[..., Tensor]) -> Callable[..., Tensor]:
     shape.
     """
 
-    @wraps(f)
+    @_builtin_wraps(f)
     def _wrapper(input: Tensor, *args: Any, **kwargs: Any) -> Tensor:
         if not isinstance(input, Tensor):
             raise TypeError(f"Input input type is not a Tensor. Got {type(input)}")
-
         if input.numel() == 0:
             raise ValueError("Invalid input tensor, it is empty.")
 
         input_shape = input.shape
-        input = _to_bcdhw(input)  # view input as (B, C, D, H, W)
-        output = f(input, *args, **kwargs)
-        if len(input_shape) == 4:
-            output = output[0]
-
-        if len(input_shape) == 3:
-            output = output[0, 0]
-
-        if len(input_shape) > 5:
-            output = output.view(*(input_shape[:-4] + output.shape[-4:]))
-
+        inp = _to_bcdhw(input)
+        output = f(inp, *args, **kwargs)
+        shape_len = len(input_shape)
+        if shape_len == 4:
+            return output[0]
+        elif shape_len == 3:
+            return output[0, 0]
+        elif shape_len > 5:
+            return output.view(*(input_shape[:-4] + output.shape[-4:]))
         return output
 
     return _wrapper
