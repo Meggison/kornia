@@ -65,14 +65,12 @@ def _compute_tensor_center(tensor: Tensor) -> Tensor:
 
 def _compute_tensor_center3d(tensor: Tensor) -> Tensor:
     """Compute the center of tensor plane for (D, H, W), (C, D, H, W) and (B, C, D, H, W)."""
-    if not 3 <= len(tensor.shape) <= 5:
-        raise AssertionError(f"Must be a 3D tensor as DHW, CDHW and BCDHW. Got {tensor.shape}.")
-    depth, height, width = tensor.shape[-3:]
-    center_x: float = float(width - 1) / 2
-    center_y: float = float(height - 1) / 2
-    center_z: float = float(depth - 1) / 2
-    center: Tensor = torch.tensor([center_x, center_y, center_z], device=tensor.device, dtype=tensor.dtype)
-    return center
+    shape = tensor.shape
+    if not 3 <= len(shape) <= 5:
+        raise AssertionError(f"Must be a 3D tensor as DHW, CDHW and BCDHW. Got {shape}.")
+    d, h, w = shape[-3:]
+    # use tensor.new_tensor for efficient device and dtype consistency
+    return tensor.new_tensor([(w - 1) / 2, (h - 1) / 2, (d - 1) / 2])
 
 
 def _compute_rotation_matrix(angle: Tensor, center: Tensor) -> Tensor:
