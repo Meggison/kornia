@@ -54,12 +54,15 @@ __all__ = [
 
 def _compute_tensor_center(tensor: Tensor) -> Tensor:
     """Compute the center of tensor plane for (H, W), (C, H, W) and (B, C, H, W)."""
-    if not 2 <= len(tensor.shape) <= 4:
-        raise AssertionError(f"Must be a 3D tensor as HW, CHW and BCHW. Got {tensor.shape}.")
-    height, width = tensor.shape[-2:]
-    center_x: float = float(width - 1) / 2
-    center_y: float = float(height - 1) / 2
-    center: Tensor = torch.tensor([center_x, center_y], device=tensor.device, dtype=tensor.dtype)
+    shape = tensor.shape
+    n_dims = len(shape)
+    if n_dims < 2 or n_dims > 4:
+        raise AssertionError(f"Must be a 3D tensor as HW, CHW and BCHW. Got {shape}.")
+    height, width = shape[-2], shape[-1]
+    center_x = (width - 1) / 2
+    center_y = (height - 1) / 2
+    # Faster than torch.tensor, guarantees matching dtype/device/memory format
+    center = tensor.new_tensor([center_x, center_y])
     return center
 
 
