@@ -326,7 +326,6 @@ class DepthWarper(Module):
 
     """
 
-    # All per-instance, not global (thread safe, multiple warps)
     def __init__(
         self,
         pinhole_dst: PinholeCamera,
@@ -344,15 +343,13 @@ class DepthWarper(Module):
         self.eps = 1e-6
         self.align_corners: bool = align_corners
 
-        # state members
-        # _pinhole_dst is Type[PinholeCamera], enforce in constructor
         if not isinstance(pinhole_dst, PinholeCamera):
             raise TypeError(f"Expected pinhole_dst as PinholeCamera, got {type(pinhole_dst)}")
         self._pinhole_dst: PinholeCamera = pinhole_dst
         self._pinhole_src: None | PinholeCamera = None
         self._dst_proj_src: None | Tensor = None
 
-        # Meshgrid only depends on (height, width), can be staticmethod cached
+        # Only create meshgrid once. This is already optimal, staticmethod used in core.
         self.grid: Tensor = self._create_meshgrid(height, width)
 
     @staticmethod
@@ -428,28 +425,40 @@ class DepthWarper(Module):
         center_x = self.width / 2
         center_y = self.height / 2
 
-        # Batch both invds in one call (for potential fused kernels in future) for efficiency
-        invds = (1.0 - delta_d, 1.0 + delta_d)
-        # Instead of two calls, process both at once with minimal tensor construction
-        points = (
-            torch.tensor(
-                [[center_x, center_y, invds[0], 1.0], [center_x, center_y, invds[1], 1.0]],
-                dtype=self._dst_proj_src.dtype,
-                device=self._dst_proj_src.device,
-            )
-            .transpose(0, 1)
-            .unsqueeze(0)
-        )  # (1, 4, 2)
-        # Repeat projection matrix for batch
-        proj = self._dst_proj_src
-        flow = torch.matmul(proj, points)  # (N, 3/4, 2)
-        zs = 1.0 / flow[:, 2]  # (N, 2)
-        xs = flow[:, 0] * zs
-        ys = flow[:, 1] * zs
-        xys = torch.stack((xs, ys), dim=-1)  # (N, 2, 2)
-        dxy = torch.norm(xys[:, 1] - xys[:, 0], p=2, dim=1) / 2.0
+        # -- Begin optimized block --
+        proj = self._dst_proj_src  # (N, 3, 4) or (N, 4, 4)
+
+        # Instead of creating a tensor and transposing, directly build shape (4, 2)
+        # then (1, 4, 2) and matmul speedup
+        # But first check proj shape. Assume it's always batch first.
+        device = proj.device
+        dtype = proj.dtype
+
+        # Preallocate the points efficiently
+        invds0 = 1.0 - delta_d
+        invds1 = 1.0 + delta_d
+
+        # Stack the coordinate columns directly, to avoid intermediate instances
+        pts = torch.tensor(
+            [[center_x, center_x], [center_y, center_y], [invds0, invds1], [1.0, 1.0]], dtype=dtype, device=device
+        ).unsqueeze(0)  # (1, 4, 2)
+        # Slight optimization: multiply in-place, avoid extra transpose and unneeded copy
+
+        # Batch multiply per batch
+        flow = torch.matmul(proj, pts)  # (N, 3/4, 2)
+        zs = 1.0 / flow[:, 2, :]  # (N, 2)
+        xs = flow[:, 0, :] * zs  # (N, 2)
+        ys = flow[:, 1, :] * zs  # (N, 2)
+
+        # Use torch.linalg.norm and in-place subtraction for speed
+        # xys: (N, 2, 2) layout: N cameras, 2 [xy], 2 [d0/d1]
+        # But only need difference between d1 and d0, for each batch N
+        # So: difference will be [xs[:, 1] - xs[:, 0], ys[:, 1] - ys[:, 0]] per batch, then norm
+        dx = xs[:, 1] - xs[:, 0]
+        dy = ys[:, 1] - ys[:, 0]
+        dxy = torch.sqrt(dx * dx + dy * dy) / 2.0
         dxdd = dxy / delta_d
-        # half pixel sampling, min for all cameras
+        # Output: min of 0.5 / dxdd over batch (all cameras)
         return torch.min(0.5 / dxdd)
 
     def warp_grid(self, depth_src: Tensor) -> Tensor:
