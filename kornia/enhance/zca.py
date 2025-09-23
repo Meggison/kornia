@@ -15,6 +15,7 @@
 # limitations under the License.
 #
 
+import math
 from typing import List, Optional, Tuple
 
 import torch
@@ -150,7 +151,7 @@ class ZCAWhitening(Module):
         return x_whiten
 
     def inverse_transform(self, x: Tensor) -> Tensor:
-        r"""Apply the inverse transform to the whitened data.
+        """Apply the inverse transform to the whitened data.
 
         Args:
             x: Whitened data.
@@ -319,24 +320,24 @@ def zca_whiten(inp: Tensor, dim: int = 0, unbiased: bool = True, eps: float = 1e
 
 
 def linear_transform(inp: Tensor, transform_matrix: Tensor, mean_vector: Tensor, dim: int = 0) -> Tensor:
-    r"""Given a transformation matrix and a mean vector, this function will flatten the input tensor along the given
+    """Given a transformation matrix and a mean vector, this function will flatten the input tensor along the given
     dimension and subtract the mean vector from it. Then the dot product with the transformation matrix will be
     computed and then the resulting tensor is reshaped to the original input shape.
 
     .. math::
 
-        \mathbf{X}_{T} = (\mathbf{X - \mu})(T)
+        \\mathbf{X}_{T} = (\\mathbf{X - \\mu})(T)
 
     Args:
         inp: Input data :math:`X`.
         transform_matrix: Transform matrix :math:`T`.
-        mean_vector: mean vector :math:`\mu`.
+        mean_vector: mean vector :math:`\\mu`.
         dim: Batch dimension.
 
     Shapes:
         - inp: :math:`(D_0,...,D_{\text{dim}},...,D_N)` is a batch of N-D tensors.
-        - transform_matrix: :math:`(\Pi_{d=0,d\neq \text{dim}}^N D_d, \Pi_{d=0,d\neq \text{dim}}^N D_d)`
-        - mean_vector: :math:`(1, \Pi_{d=0,d\neq \text{dim}}^N D_d)`
+        - transform_matrix: :math:`(\\Pi_{d=0,d\neq \text{dim}}^N D_d, \\Pi_{d=0,d\neq \text{dim}}^N D_d)`
+        - mean_vector: :math:`(1, \\Pi_{d=0,d\neq \text{dim}}^N D_d)`
 
     Returns:
         Transformed data.
@@ -358,36 +359,25 @@ def linear_transform(inp: Tensor, transform_matrix: Tensor, mean_vector: Tensor,
         >>> print(out.shape, out.unique()) # Should a be (10,2) tensor of 2s
         torch.Size([10, 2]) tensor([2.])
 
-    """  # noqa: D205
+    """
     inp_size = inp.size()
-
-    if dim >= len(inp_size) or dim < -len(inp_size):
-        raise IndexError(
-            f"Dimension out of range (expected to be in range of [{-len(inp_size)},{len(inp_size) - 1}], but got {dim}"
-        )
-
+    ndim = len(inp_size)
     if dim < 0:
-        dim = len(inp_size) + dim
+        dim += ndim
+    if not (0 <= dim < ndim):
+        raise IndexError(f"Dimension out of range (expected to be in range of [{-ndim},{ndim - 1}], but got {dim})")
 
-    feat_dims = concatenate([torch.arange(0, dim), torch.arange(dim + 1, len(inp_size))])
+    # --- Optimization: compute feature indices as python range only once, build perm by concatenating lists
+    feat_dims = [d for d in range(ndim) if d != dim]
+    perm = [dim] + feat_dims
+    inv_order = [perm.index(i) for i in range(ndim)]
+    feature_sizes = tuple(inp_size[d] for d in feat_dims)
+    num_features = math.prod(feature_sizes) if feature_sizes else 1
 
-    perm = concatenate([tensor([dim]), feat_dims])
-    perm_inv = torch.argsort(perm)
-
-    new_order: List[int] = perm.tolist()
-    inv_order: List[int] = perm_inv.tolist()
-
-    feature_sizes = tensor(inp_size[0:dim] + inp_size[dim + 1 : :])
-    num_features: int = int(torch.prod(feature_sizes).item())
-
-    inp_permute = inp.permute(new_order)
-    inp_flat = inp_permute.reshape((-1, num_features))
-
+    inp_permute = inp.permute(perm)
+    inp_flat = inp_permute.reshape(-1, num_features)
     inp_center = inp_flat - mean_vector
     inp_transformed = inp_center.mm(transform_matrix)
-
-    inp_transformed = inp_transformed.reshape(inp_permute.size())
-
+    inp_transformed = inp_transformed.reshape(inp_permute.shape)
     inp_transformed = inp_transformed.permute(inv_order)
-
     return inp_transformed
