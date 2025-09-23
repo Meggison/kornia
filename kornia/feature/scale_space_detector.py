@@ -33,7 +33,7 @@ from .responses import BlobHessian
 
 
 def _scale_index_to_scale(max_coords: Tensor, sigmas: Tensor, num_levels: int) -> Tensor:
-    r"""Auxiliary function for ScaleSpaceDetector.
+    """Auxiliary function for ScaleSpaceDetector.
 
     Converts scale level index from ConvSoftArgmax3d to the actual
     scale, using the sigmas from the ScalePyramid output.
@@ -47,18 +47,21 @@ def _scale_index_to_scale(max_coords: Tensor, sigmas: Tensor, num_levels: int) -
         tensor [BxNx3].
 
     """
-    # depth (scale) in coord_max is represented as (float) index, not the scale yet.
-    # we will interpolate the scale using pytorch.grid_sample function
-    # Because grid_sample is for 4d input only, we will create fake 2nd dimension
-    # ToDo: replace with 3d input, when grid_sample will start to support it
-
-    # Reshape for grid shape
+    # Fast path: Avoid extra views and operate fully in batched vectorized style.
     B, N, _ = max_coords.shape
-    scale_coords = max_coords[:, :, 0].contiguous().view(-1, 1, 1, 1)
-    # Replace the scale_x_y
-    out = concatenate(
-        [sigmas[0, 0] * torch.pow(2.0, scale_coords / float(num_levels)).view(B, N, 1), max_coords[:, :, 1:]], 2
-    )
+
+    # --- OPTIMIZATION: vectorize and minimize view/copy operations ---
+    # Directly grab the scale index, shape [B, N]
+    scale_idx = max_coords[:, :, 0]
+
+    # Compute the actual scale. Use broadcasting and shape [B, N, 1]
+    scale = sigmas[0, 0] * torch.pow(2.0, scale_idx / float(num_levels)).unsqueeze(-1)
+
+    # Concatenate directly with the other coordinates (Y, Z), shape [B, N, 2]
+    other_coords = max_coords[:, :, 1:]
+
+    # Concatenate along the last dimension, much faster than previous view/reshape
+    out = torch.cat((scale, other_coords), dim=2)
     return out
 
 
