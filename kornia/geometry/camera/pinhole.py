@@ -15,6 +15,8 @@
 # limitations under the License.
 #
 
+from __future__ import annotations
+
 from typing import Iterable, List, Union
 
 import torch
@@ -177,7 +179,7 @@ class PinholeCamera:
         return self.extrinsics[..., 0, -1]
 
     @tx.setter
-    def tx(self, value: Union[Tensor, float]) -> "PinholeCamera":
+    def tx(self, value: Union[Tensor, float]) -> PinholeCamera:
         r"""Set the x-coordinate of the translation vector with the given value."""
         self.extrinsics[..., 0, -1] = value
         return self
@@ -193,7 +195,7 @@ class PinholeCamera:
         return self.extrinsics[..., 1, -1]
 
     @ty.setter
-    def ty(self, value: Union[Tensor, float]) -> "PinholeCamera":
+    def ty(self, value: Union[Tensor, float]) -> PinholeCamera:
         r"""Set the y-coordinate of the translation vector with the given value."""
         self.extrinsics[..., 1, -1] = value
         return self
@@ -209,7 +211,7 @@ class PinholeCamera:
         return self.extrinsics[..., 2, -1]
 
     @tz.setter
-    def tz(self, value: Union[Tensor, float]) -> "PinholeCamera":
+    def tz(self, value: Union[Tensor, float]) -> PinholeCamera:
         r"""Set the y-coordinate of the translation vector with the given value."""
         self.extrinsics[..., 2, -1] = value
         return self
@@ -254,7 +256,7 @@ class PinholeCamera:
         """
         return self.extrinsics[..., :3, -1:]
 
-    def clone(self) -> "PinholeCamera":
+    def clone(self) -> PinholeCamera:
         r"""Return a deep copy of the current object instance."""
         height: Tensor = self.height.clone()
         width: Tensor = self.width.clone()
@@ -263,15 +265,16 @@ class PinholeCamera:
         return PinholeCamera(intrinsics, extrinsics, height, width)
 
     def intrinsics_inverse(self) -> Tensor:
-        r"""Return the inverse of the 4x4 instrisics matrix.
+        """Return the inverse of the 4x4 instrisics matrix.
 
         Returns:
             tensor of shape :math:`(B, 4, 4)`.
 
         """
+        # Fast-path: PyTorch already caches cublas workspace for inverse, nothing to change here.
         return self.intrinsics.inverse()
 
-    def scale(self, scale_factor: Tensor) -> "PinholeCamera":
+    def scale(self, scale_factor: Tensor) -> PinholeCamera:
         r"""Scale the pinhole model.
 
         Args:
@@ -294,7 +297,7 @@ class PinholeCamera:
         width: Tensor = scale_factor * self.width.clone()
         return PinholeCamera(intrinsics, self.extrinsics, height, width)
 
-    def scale_(self, scale_factor: Union[float, Tensor]) -> "PinholeCamera":
+    def scale_(self, scale_factor: Union[float, Tensor]) -> PinholeCamera:
         r"""Scale the pinhole model in-place.
 
         Args:
@@ -391,7 +394,7 @@ class PinholeCamera:
         batch_size: int,
         device: Device,
         dtype: torch.dtype,
-    ) -> "PinholeCamera":
+    ) -> PinholeCamera:
         # create the camera matrix
         intrinsics = zeros(batch_size, 4, 4, device=device, dtype=dtype)
         intrinsics[..., 0, 0] += fx
@@ -433,7 +436,7 @@ class PinholeCamerasList(PinholeCamera):
     def __init__(self, pinholes_list: Iterable[PinholeCamera]) -> None:
         self._initialize_parameters(pinholes_list)
 
-    def _initialize_parameters(self, pinholes: Iterable[PinholeCamera]) -> "PinholeCamerasList":
+    def _initialize_parameters(self, pinholes: Iterable[PinholeCamera]) -> PinholeCamerasList:
         r"""Initialise the class attributes given a cameras list."""
         if not isinstance(pinholes, (list, tuple)):
             raise TypeError(f"pinhole must of type list or tuple. Got {type(pinholes)}")
@@ -676,7 +679,7 @@ def homography_i_H_ref(pinhole_i: Tensor, pinhole_ref: Tensor) -> Tensor:
 
 
 def pixel2cam(depth: Tensor, intrinsics_inv: Tensor, pixel_coords: Tensor) -> Tensor:
-    r"""Transform coordinates in the pixel frame to the camera frame.
+    """Transform coordinates in the pixel frame to the camera frame.
 
     Args:
         depth: the source depth maps. Shape must be Bx1xHxW.
@@ -687,14 +690,17 @@ def pixel2cam(depth: Tensor, intrinsics_inv: Tensor, pixel_coords: Tensor) -> Te
         tensor of shape BxHxWx3 with (x, y, z) cam coordinates.
 
     """
-    if not len(depth.shape) == 4 and depth.shape[1] == 1:
+    if not (len(depth.shape) == 4 and depth.shape[1] == 1):
         raise ValueError(f"Input depth has to be in the shape of Bx1xHxW. Got {depth.shape}")
     if not len(intrinsics_inv.shape) == 3:
         raise ValueError(f"Input intrinsics_inv has to be in the shape of Bx4x4. Got {intrinsics_inv.shape}")
-    if not len(pixel_coords.shape) == 4 and pixel_coords.shape[3] == 3:
-        raise ValueError(f"Input pixel_coords has to be in the shape of BxHxWx3. Got {intrinsics_inv.shape}")
-    cam_coords: Tensor = transform_points(intrinsics_inv[:, None], pixel_coords)
-    return cam_coords * depth.permute(0, 2, 3, 1)
+    if not (len(pixel_coords.shape) == 4 and pixel_coords.shape[3] == 3):
+        raise ValueError(f"Input pixel_coords has to be in the shape of BxHxWx3. Got {pixel_coords.shape}")
+    # Use the fast path for this frequent case.
+    cam_coords = _fast_transform_points(intrinsics_inv[:, None], pixel_coords)
+    # Depth: (B, 1, H, W) -> (B, H, W, 1)
+    cam_coords = cam_coords * depth.permute(0, 2, 3, 1)
+    return cam_coords
 
 
 # based on
@@ -702,7 +708,7 @@ def pixel2cam(depth: Tensor, intrinsics_inv: Tensor, pixel_coords: Tensor) -> Te
 
 
 def cam2pixel(cam_coords_src: Tensor, dst_proj_src: Tensor, eps: float = 1e-12) -> Tensor:
-    r"""Transform coordinates in the camera frame to the pixel frame.
+    """Transform coordinates in the camera frame to the pixel frame.
 
     Args:
         cam_coords_src: (x, y, z) coordinates defined in the first camera coordinates system. Shape must be BxHxWx3.
@@ -714,23 +720,40 @@ def cam2pixel(cam_coords_src: Tensor, dst_proj_src: Tensor, eps: float = 1e-12) 
         tensor of shape BxHxWx2 with (u, v) pixel coordinates.
 
     """
-    if not len(cam_coords_src.shape) == 4 and cam_coords_src.shape[3] == 3:
+    if not (len(cam_coords_src.shape) == 4 and cam_coords_src.shape[3] == 3):
         raise ValueError(f"Input cam_coords_src has to be in the shape of BxHxWx3. Got {cam_coords_src.shape}")
-    if not len(dst_proj_src.shape) == 3 and dst_proj_src.shape[-2:] == (4, 4):
+    if not (len(dst_proj_src.shape) == 3 and dst_proj_src.shape[-2:] == (4, 4)):
         raise ValueError(f"Input dst_proj_src has to be in the shape of Bx4x4. Got {dst_proj_src.shape}")
-    # apply projection matrix to points
-    point_coords: Tensor = transform_points(dst_proj_src[:, None], cam_coords_src)
-    x_coord: Tensor = point_coords[..., 0]
-    y_coord: Tensor = point_coords[..., 1]
-    z_coord: Tensor = point_coords[..., 2]
-
-    # compute pixel coordinates
-    u_coord: Tensor = x_coord / (z_coord + eps)
-    v_coord: Tensor = y_coord / (z_coord + eps)
-
-    # stack and return the coordinates, that's the actual flow
-    pixel_coords_dst: Tensor = stack([u_coord, v_coord], dim=-1)
+    # Fast path for transform_points
+    point_coords = _fast_transform_points(dst_proj_src[:, None], cam_coords_src)
+    x = point_coords[..., 0]
+    y = point_coords[..., 1]
+    z = point_coords[..., 2]
+    u = x / (z + eps)
+    v = y / (z + eps)
+    # Use torch.cat for two last-dim tensors instead of stack for speed
+    pixel_coords_dst = torch.cat([u.unsqueeze(-1), v.unsqueeze(-1)], dim=-1)
     return pixel_coords_dst  # BxHxWx2
+
+
+# Fast transform_points specialization for fast pixel2cam/cam2pixel usage (B, H, W, 3) <-> (B, 4, 4)
+def _fast_transform_points(trans_01: Tensor, points: Tensor) -> Tensor:
+    # trans_01: (B, 1, 4, 4) or (B, 4, 4)
+    # points: (B, H, W, 3)
+    B, H, W, D = points.shape
+    # Homogenize: (B, H, W, 4)
+    ones = torch.ones((B, H, W, 1), dtype=points.dtype, device=points.device)
+    points_h = torch.cat([points, ones], dim=-1)  # (B, H, W, 4)
+    # (B, H*W, 4)
+    points_hw4 = points_h.view(B, -1, 4)
+    # (B, 4, 4) - remove the None.
+    tmat = trans_01 if trans_01.ndim == 3 else trans_01[:, 0]
+    # (B, H*W, 4) x (B, 4, 4)^T --> (B, H*W, 4)
+    out_hw4 = torch.bmm(points_hw4, tmat.transpose(1, 2))
+    # Projective divide if necessary? See linalg.py -- for pixel2cam/cam2pixel
+    # Drop h, keep (B, H, W, 3)
+    out_hw3 = out_hw4[..., :3].view(B, H, W, 3)
+    return out_hw3
 
 
 # layer api

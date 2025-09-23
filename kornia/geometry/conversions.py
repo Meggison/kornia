@@ -875,7 +875,7 @@ def quaternion_from_euler(roll: Tensor, pitch: Tensor, yaw: Tensor) -> tuple[Ten
 
 
 def normalize_pixel_coordinates(pixel_coordinates: Tensor, height: int, width: int, eps: float = 1e-8) -> Tensor:
-    r"""Normalize pixel coordinates between -1 and 1.
+    """Normalize pixel coordinates between -1 and 1.
 
     Normalized, -1 if on extreme left, 1 if on extreme right (x = w-1).
 
@@ -896,18 +896,18 @@ def normalize_pixel_coordinates(pixel_coordinates: Tensor, height: int, width: i
     """
     if pixel_coordinates.shape[-1] != 2:
         raise ValueError(f"Input pixel_coordinates must be of shape (*, 2). Got {pixel_coordinates.shape}")
-
-    # compute normalization factor
-    hw: Tensor = stack(
-        [
-            tensor(width, device=pixel_coordinates.device, dtype=pixel_coordinates.dtype),
-            tensor(height, device=pixel_coordinates.device, dtype=pixel_coordinates.dtype),
-        ]
-    )
-
-    factor: Tensor = tensor(2.0, device=pixel_coordinates.device, dtype=pixel_coordinates.dtype) / (hw - 1).clamp(eps)
-
-    return factor * pixel_coordinates - 1
+    # Fast constant factor math, using float instead of repeated stack+tensor
+    width_f = float(width)
+    height_f = float(height)
+    # (2.0/(size-1))
+    factor_x = 2.0 / max(width_f - 1, eps)
+    factor_y = 2.0 / max(height_f - 1, eps)
+    # pixel_coordinates: (..., 2)
+    # Broadcasting multiply and subtract
+    result = pixel_coordinates.clone()
+    result[..., 0] = result[..., 0] * factor_x - 1
+    result[..., 1] = result[..., 1] * factor_y - 1
+    return result
 
 
 def denormalize_pixel_coordinates(pixel_coordinates: Tensor, height: int, width: int, eps: float = 1e-8) -> Tensor:
@@ -1576,3 +1576,23 @@ def vector_to_skew_symmetric_matrix(vec: Tensor) -> Tensor:
         [stack([zeros, -v3, v2], dim=-1), stack([v3, zeros, -v1], dim=-1), stack([-v2, v1, zeros], dim=-1)], dim=-2
     )
     return skew_symmetric_matrix
+
+
+# Fast transform_points specialization for fast pixel2cam/cam2pixel usage (B, H, W, 3) <-> (B, 4, 4)
+def _fast_transform_points(trans_01: Tensor, points: Tensor) -> Tensor:
+    # trans_01: (B, 1, 4, 4) or (B, 4, 4)
+    # points: (B, H, W, 3)
+    B, H, W, D = points.shape
+    # Homogenize: (B, H, W, 4)
+    ones = torch.ones((B, H, W, 1), dtype=points.dtype, device=points.device)
+    points_h = torch.cat([points, ones], dim=-1)  # (B, H, W, 4)
+    # (B, H*W, 4)
+    points_hw4 = points_h.view(B, -1, 4)
+    # (B, 4, 4) - remove the None.
+    tmat = trans_01 if trans_01.ndim == 3 else trans_01[:, 0]
+    # (B, H*W, 4) x (B, 4, 4)^T --> (B, H*W, 4)
+    out_hw4 = torch.bmm(points_hw4, tmat.transpose(1, 2))
+    # Projective divide if necessary? See linalg.py -- for pixel2cam/cam2pixel
+    # Drop h, keep (B, H, W, 3)
+    out_hw3 = out_hw4[..., :3].view(B, H, W, 3)
+    return out_hw3
