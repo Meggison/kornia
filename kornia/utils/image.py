@@ -300,24 +300,26 @@ def perform_keep_shape_image(f: Callable[..., Tensor]) -> Callable[..., Tensor]:
 
     @wraps(f)
     def _wrapper(input: Tensor, *args: Any, **kwargs: Any) -> Tensor:
+        # Fast path type and shape checks
         if not isinstance(input, Tensor):
             raise TypeError(f"Input input type is not a Tensor. Got {type(input)}")
-
         if input.shape.numel() == 0:
             raise ValueError("Invalid input tensor, it is empty.")
 
         input_shape = input.shape
-        input = _to_bchw(input)  # view input as (B, C, H, W)
-        output = f(input, *args, **kwargs)
-        if len(input_shape) == 3:
-            output = output[0]
+        in_dims = len(input_shape)
+        input_bchw = _to_bchw(input)  # Only one view/copy
 
-        if len(input_shape) == 2:
-            output = output[0, 0]
+        output = f(input_bchw, *args, **kwargs)
 
-        if len(input_shape) > 4:
-            output = output.view(*(input_shape[:-3] + output.shape[-3:]))
-
+        # Fast-path restoration of original shape
+        if in_dims == 3:
+            return output[0]
+        if in_dims == 2:
+            return output[0, 0]
+        if in_dims > 4:
+            # Use tuple concatenation instead of repeat view/copy
+            return output.view(*input_shape[:-3], *output.shape[-3:])
         return output
 
     return _wrapper
@@ -353,3 +355,8 @@ def perform_keep_shape_video(f: Callable[..., Tensor]) -> Callable[..., Tensor]:
         return output
 
     return _wrapper
+
+
+WRAPPER_ASSIGNMENTS = ("__module__", "__name__", "__qualname__", "__doc__", "__annotations__", "__type_params__")
+
+WRAPPER_UPDATES = ("__dict__",)
