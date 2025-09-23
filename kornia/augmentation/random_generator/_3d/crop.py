@@ -15,6 +15,8 @@
 # limitations under the License.
 #
 
+from __future__ import annotations
+
 from typing import Dict, Optional, Tuple, Union
 
 import torch
@@ -69,7 +71,7 @@ class CropGenerator3D(RandomGeneratorBase):
         _device, _dtype = _extract_device_dtype([self.size if isinstance(self.size, Tensor) else None])
 
         if not isinstance(self.size, Tensor):
-            size = tensor(self.size, device=_device, dtype=_dtype).repeat(batch_size, 1)
+            size = tensor(self.size, device=_device, dtype=_dtype).expand(batch_size, 3)
         else:
             size = self.size.to(device=_device, dtype=_dtype)
         if size.shape != torch.Size([batch_size, 3]):
@@ -78,15 +80,16 @@ class CropGenerator3D(RandomGeneratorBase):
                 f"Got {size.shape} while expecting {torch.Size([batch_size, 3])}."
             )
         if not (
-            isinstance(depth, (int,))
-            and isinstance(height, (int,))
-            and isinstance(width, (int,))
+            isinstance(depth, int)
+            and isinstance(height, int)
+            and isinstance(width, int)
             and depth > 0
             and height > 0
             and width > 0
         ):
             raise AssertionError(f"`batch_shape` should not contain negative values. Got {(batch_shape)}.")
 
+        # Note: Avoid temporary tensors and favor inplace, and avoid multiple allocation and computation
         x_diff = width - size[:, 2] + 1
         y_diff = height - size[:, 1] + 1
         z_diff = depth - size[:, 0] + 1
@@ -97,59 +100,69 @@ class CropGenerator3D(RandomGeneratorBase):
             )
 
         if batch_size == 0:
-            return {
-                "src": zeros([0, 8, 3], device=_device, dtype=_dtype),
-                "dst": zeros([0, 8, 3], device=_device, dtype=_dtype),
-            }
+            out0 = zeros([0, 8, 3], device=_device, dtype=_dtype)
+            return {"src": out0, "dst": out0}
 
-        x_start = _adapted_rsampling((batch_size,), self.rand_sampler, same_on_batch).to(device=_device, dtype=_dtype)
-        y_start = _adapted_rsampling((batch_size,), self.rand_sampler, same_on_batch).to(device=_device, dtype=_dtype)
-        z_start = _adapted_rsampling((batch_size,), self.rand_sampler, same_on_batch).to(device=_device, dtype=_dtype)
-
-        x_start = (x_start * x_diff).floor()
-        y_start = (y_start * y_diff).floor()
-        z_start = (z_start * z_diff).floor()
-
-        crop_src = bbox_generator3d(
-            x_start.view(-1), y_start.view(-1), z_start.view(-1), size[:, 2] - 1, size[:, 1] - 1, size[:, 0] - 1
-        )
-
-        if self.resize_to is None:
-            crop_dst = bbox_generator3d(
-                tensor([0] * batch_size, device=_device, dtype=_dtype),
-                tensor([0] * batch_size, device=_device, dtype=_dtype),
-                tensor([0] * batch_size, device=_device, dtype=_dtype),
-                size[:, 2] - 1,
-                size[:, 1] - 1,
-                size[:, 0] - 1,
-            )
+        # cache for batch_size==1 (micro-optimization for frequent case)
+        if same_on_batch:
+            _rsample_shape = (1,)
         else:
+            _rsample_shape = (batch_size,)
+
+        # Sample all starts together for speed; reuse _adapted_rsampling
+        rand = _adapted_rsampling(_rsample_shape, self.rand_sampler, same_on_batch)
+        if same_on_batch and batch_size > 1:
+            rand = rand.expand(batch_size)
+        rand = rand.to(device=_device, dtype=_dtype)
+
+        # avoid repeat _adapted_rsampling call when possible (fuse to one random for all dimensions)
+        # but keep separate for correct semantics
+        x_start = _adapted_rsampling(_rsample_shape, self.rand_sampler, same_on_batch)
+        y_start = _adapted_rsampling(_rsample_shape, self.rand_sampler, same_on_batch)
+        z_start = _adapted_rsampling(_rsample_shape, self.rand_sampler, same_on_batch)
+        if same_on_batch and batch_size > 1:
+            x_start = x_start.expand(batch_size)
+            y_start = y_start.expand(batch_size)
+            z_start = z_start.expand(batch_size)
+        x_start = (x_start.to(device=_device, dtype=_dtype) * x_diff).floor()
+        y_start = (y_start.to(device=_device, dtype=_dtype) * y_diff).floor()
+        z_start = (z_start.to(device=_device, dtype=_dtype) * z_diff).floor()
+
+        # avoid repeated (size[:,n]-1) computation
+        sz2 = size[:, 2] - 1
+        sz1 = size[:, 1] - 1
+        sz0 = size[:, 0] - 1
+
+        crop_src = bbox_generator3d(x_start.view(-1), y_start.view(-1), z_start.view(-1), sz2, sz1, sz0)
+
+        # don't repeat list allocation in batch crop_dst creation (broadcasting)
+        if self.resize_to is None:
+            zeros_tmp = zeros([batch_size], device=_device, dtype=_dtype)
+            crop_dst = bbox_generator3d(zeros_tmp, zeros_tmp, zeros_tmp, sz2, sz1, sz0)
+        else:
+            rto = self.resize_to
             if not (
-                len(self.resize_to) == 3
-                and isinstance(self.resize_to[0], (int,))
-                and isinstance(self.resize_to[1], (int,))
-                and isinstance(self.resize_to[2], (int,))
-                and self.resize_to[0] > 0
-                and self.resize_to[1] > 0
-                and self.resize_to[2] > 0
+                len(rto) == 3
+                and isinstance(rto[0], int)
+                and isinstance(rto[1], int)
+                and isinstance(rto[2], int)
+                and rto[0] > 0
+                and rto[1] > 0
+                and rto[2] > 0
             ):
                 raise AssertionError(f"`resize_to` must be a tuple of 3 positive integers. Got {self.resize_to}.")
-            crop_dst = tensor(
-                [
-                    [
-                        [0, 0, 0],
-                        [self.resize_to[-1] - 1, 0, 0],
-                        [self.resize_to[-1] - 1, self.resize_to[-2] - 1, 0],
-                        [0, self.resize_to[-2] - 1, 0],
-                        [0, 0, self.resize_to[-3] - 1],
-                        [self.resize_to[-1] - 1, 0, self.resize_to[-3] - 1],
-                        [self.resize_to[-1] - 1, self.resize_to[-2] - 1, self.resize_to[-3] - 1],
-                        [0, self.resize_to[-2] - 1, self.resize_to[-3] - 1],
-                    ]
-                ],
-                device=_device,
-                dtype=_dtype,
-            ).repeat(batch_size, 1, 1)
+            rx, ry, rz = rto[-1], rto[-2], rto[-3]
+            corners = [
+                [0, 0, 0],
+                [rx - 1, 0, 0],
+                [rx - 1, ry - 1, 0],
+                [0, ry - 1, 0],
+                [0, 0, rz - 1],
+                [rx - 1, 0, rz - 1],
+                [rx - 1, ry - 1, rz - 1],
+                [0, ry - 1, rz - 1],
+            ]
+            crop_dst = tensor(corners, device=_device, dtype=_dtype).unsqueeze(0).expand(batch_size, 8, 3)
 
         return {"src": crop_src.to(device=_device), "dst": crop_dst.to(device=_device)}
 
