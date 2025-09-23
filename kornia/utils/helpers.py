@@ -145,26 +145,22 @@ def _extract_device_dtype(tensor_list: List[Optional[Any]]) -> Tuple[torch.devic
 
     """
     device, dtype = None, None
-    for tensor in tensor_list:
-        if tensor is not None:
-            if not isinstance(tensor, (Tensor,)):
-                continue
-            _device = tensor.device
-            _dtype = tensor.dtype
+    # Note: We skip non-tensor and only consider first valid tensor for device/dtype
+    for tensor_ in tensor_list:
+        if tensor_ is not None and isinstance(tensor_, (Tensor,)):
+            _device, _dtype = tensor_.device, tensor_.dtype
             if device is None and dtype is None:
-                device = _device
-                dtype = _dtype
+                device, dtype = _device, _dtype
             elif device != _device or dtype != _dtype:
                 raise ValueError(
                     "Passed values are not in the same device and dtype."
                     f"Got ({device}, {dtype}) and ({_device}, {_dtype})."
                 )
     if device is None:
-        # TODO: update this when having torch.get_default_device()
         device = torch.device("cpu")
     if dtype is None:
         dtype = torch.get_default_dtype()
-    return (device, dtype)
+    return device, dtype
 
 
 def _torch_inverse_cast(input: Tensor) -> Tensor:
