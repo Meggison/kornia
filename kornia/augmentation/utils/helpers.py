@@ -15,10 +15,13 @@
 # limitations under the License.
 #
 
+from __future__ import annotations
+
 from functools import wraps
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import torch
+from line_profiler import profile as codeflash_line_profile
 from torch.distributions import Beta, Uniform
 
 from kornia.core import Tensor, as_tensor
@@ -101,6 +104,7 @@ def _infer_batch_shape3d(input: Union[Tensor, Tuple[Tensor, Tensor]]) -> torch.S
     return tensor.shape
 
 
+@codeflash_line_profile
 def _transform_input_by_shape(input: Tensor, reference_shape: Tensor, match_channel: bool = True) -> Tensor:
     """Reshape an input tensor to have the same dimensions as the reference_shape.
 
@@ -159,6 +163,7 @@ def _transform_input3d_by_shape(input: Tensor, reference_shape: Tensor, match_ch
     return input
 
 
+@codeflash_line_profile
 def _transform_input(input: Tensor) -> Tensor:
     r"""Reshape an input tensor to be (*, C, H, W). Accept either (H, W), (C, H, W) or (*, C, H, W).
 
@@ -211,6 +216,7 @@ def _transform_input3d(input: Tensor) -> Tensor:
     return input
 
 
+@codeflash_line_profile
 def _validate_input_dtype(input: Tensor, accepted_dtypes: List[torch.dtype]) -> None:
     r"""Check if the dtype of the input tensor is in the range of accepted_dtypes.
 
@@ -288,18 +294,18 @@ def _adapted_rsampling(
     dist: torch.distributions.Distribution,
     same_on_batch: Optional[bool] = False,
 ) -> Tensor:
-    r"""Sample from a uniform reparameterized sampling function that accepts 'same_on_batch'.
+    """Sample from a uniform reparameterized sampling function that accepts 'same_on_batch'.
 
     If same_on_batch is True, all values generated will be exactly same given a batch_size (shape[0]). By default,
     same_on_batch is set to False.
     """
-    if isinstance(shape, tuple):
-        shape = torch.Size(shape)
-
+    shape = torch.Size(shape) if not isinstance(shape, torch.Size) else shape
     if same_on_batch:
-        rsample_size = torch.Size((1, *shape[1:]))
-        rsample = dist.rsample(rsample_size)
-        return rsample.repeat(shape[0], *[1] * (len(rsample.shape) - 1))
+        # Only sample once and repeat to avoid extra compute/memory
+        rsample = dist.rsample(torch.Size((1, *shape[1:])))
+        if shape[0] == 1:
+            return rsample
+        return rsample.expand(shape)  # Faster than repeat in this context
     return dist.rsample(shape)
 
 

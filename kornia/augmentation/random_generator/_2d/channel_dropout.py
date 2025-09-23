@@ -60,15 +60,24 @@ class ChannelDropoutGenerator(RandomGeneratorBase):
         self.drop_sampler = UniformDistribution(drop[0], drop[1], validate_args=False)
 
     def forward(self, batch_shape: tuple[int, ...], same_on_batch: bool = False) -> dict[str, Tensor]:
-        r"""Generate a mask for dropout channels."""
+        """Generate a mask for dropout channels."""
         batch_size, channels, _, _ = batch_shape
         _common_param_check(batch_size, same_on_batch)
-        _device, _dtype = self.device, self.dtype
+        _device = self.device
+        _dtype = self.dtype
 
+        # Preallocate idxs in a single step, avoid per-batch-looping
         batch_idx = torch.arange(batch_size, device=_device, dtype=torch.long).reshape(batch_size, 1)
-        channel_idx = torch.argsort(
-            _adapted_rsampling((batch_size, channels), self.drop_sampler, same_on_batch), dim=1
-        )[:, : self.num_drop_channels].to(torch.long)
+
+        # Directly sample noise and argsort
+        rsampled = _adapted_rsampling((batch_size, channels), self.drop_sampler, same_on_batch)
+        # Use topk for faster selection when number of dropped channels is small, else fallback to argsort slice
+        if 0 < self.num_drop_channels < channels // 2:
+            # torch.topk gives indices of largest, so negate input for "smallest"
+            vals, channel_idx = torch.topk(-rsampled, self.num_drop_channels, dim=1, largest=True)
+            channel_idx = channel_idx
+        else:
+            channel_idx = torch.argsort(rsampled, dim=1)[:, : self.num_drop_channels]
 
         return {
             "batch_idx": batch_idx,
