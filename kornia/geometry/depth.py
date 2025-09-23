@@ -24,7 +24,7 @@ from typing import Optional
 import torch
 
 import kornia.core as kornia_ops
-from kornia.core import Module, Tensor, tensor
+from kornia.core import Module, Tensor
 from kornia.core.check import KORNIA_CHECK, KORNIA_CHECK_IS_TENSOR, KORNIA_CHECK_SHAPE
 from kornia.filters.sobel import spatial_gradient
 from kornia.utils import create_meshgrid
@@ -326,7 +326,6 @@ class DepthWarper(Module):
 
     """
 
-    # All per-instance, not global (thread safe, multiple warps)
     def __init__(
         self,
         pinhole_dst: PinholeCamera,
@@ -344,15 +343,12 @@ class DepthWarper(Module):
         self.eps = 1e-6
         self.align_corners: bool = align_corners
 
-        # state members
-        # _pinhole_dst is Type[PinholeCamera], enforce in constructor
         if not isinstance(pinhole_dst, PinholeCamera):
             raise TypeError(f"Expected pinhole_dst as PinholeCamera, got {type(pinhole_dst)}")
         self._pinhole_dst: PinholeCamera = pinhole_dst
         self._pinhole_src: None | PinholeCamera = None
         self._dst_proj_src: None | Tensor = None
 
-        # Meshgrid only depends on (height, width), can be staticmethod cached
         self.grid: Tensor = self._create_meshgrid(height, width)
 
     @staticmethod
@@ -405,15 +401,18 @@ class DepthWarper(Module):
         return self
 
     def _compute_projection(self, x: float, y: float, invd: float) -> Tensor:
+        # Skip checks/raises as they're extremely cheap for single call
         if self._dst_proj_src is None or self._pinhole_src is None:
             raise ValueError("Please, call compute_projection_matrix.")
 
-        point = tensor([[[x], [y], [invd], [1.0]]], device=self._dst_proj_src.device, dtype=self._dst_proj_src.dtype)
-        flow = torch.matmul(self._dst_proj_src, point)
-        z = 1.0 / flow[:, 2]
-        _x = flow[:, 0] * z
-        _y = flow[:, 1] * z
-        return kornia_ops.concatenate([_x, _y], 1)
+        # Construct 4x1 vector efficiently, batch dim implicit for mm.
+        device, dtype = self._dst_proj_src.device, self._dst_proj_src.dtype
+        point = torch.tensor([x, y, invd, 1.0], device=device, dtype=dtype).reshape(4, 1)
+        flow = torch.matmul(self._dst_proj_src, point)  # shape: (N, 3, 1)
+        z = 1.0 / flow[:, 2:3]  # shape: (N, 1, 1)
+        xy = flow[:, 0:2, :] * z  # shape: (N, 2, 1)
+        # Remove last empty dim and return cat
+        return xy.squeeze(-1)
 
     def compute_subpixel_step(self) -> Tensor:
         """Compute the inverse depth step for sub pixel accurate sampling of the depth cost volume, per camera.
