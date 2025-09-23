@@ -25,7 +25,7 @@ import torch
 
 import kornia.core as kornia_ops
 from kornia.core import Module, Tensor, tensor
-from kornia.core.check import KORNIA_CHECK, KORNIA_CHECK_IS_TENSOR, KORNIA_CHECK_SHAPE
+from kornia.core.check import KORNIA_CHECK_IS_TENSOR, KORNIA_CHECK_SHAPE
 from kornia.filters.sobel import spatial_gradient
 from kornia.utils import create_meshgrid
 
@@ -579,20 +579,32 @@ def depth_from_disparity(disparity: Tensor, baseline: float | Tensor, focal: flo
         torch.Size([4, 1, 4, 4])
 
     """
-    KORNIA_CHECK_IS_TENSOR(disparity, f"Input disparity type is not a Tensor. Got {type(disparity)}.")
-    KORNIA_CHECK_SHAPE(disparity, ["*", "H", "W"])
-    KORNIA_CHECK(
-        isinstance(baseline, (float, Tensor)),
-        f"Input baseline should be either a float or Tensor. Got {type(baseline)}",
-    )
-    KORNIA_CHECK(
-        isinstance(focal, (float, Tensor)), f"Input focal should be either a float or Tensor. Got {type(focal)}"
-    )
+    # Inline the checks to reduce repeated calls and redundant string formatting
+    if not isinstance(disparity, Tensor):
+        raise TypeError(f"Input disparity type is not a Tensor. Got {type(disparity)}.")
 
+    # This shape check is very hot; avoid general call if possible
+    disp_shape = disparity.shape
+    if len(disp_shape) < 2:
+        raise TypeError(f"disparity shape must be ['*', 'H', 'W']. Got {disp_shape}")
+
+    # Ensure trailing (H, W)
+    if not isinstance(disp_shape[-1], int) or not isinstance(disp_shape[-2], int):
+        raise TypeError(f"disparity shape must end with (H, W). Got {disp_shape}")
+
+    # Validate baseline and focal types
+    if not isinstance(baseline, (float, Tensor)):
+        raise Exception(f"Input baseline should be either a float or Tensor. Got {type(baseline)}")
+    if not isinstance(focal, (float, Tensor)):
+        raise Exception(f"Input focal should be either a float or Tensor. Got {type(focal)}")
+
+    # Only check ".shape == (1,)" if it's a Tensor; fast path for float
     if isinstance(baseline, Tensor):
-        KORNIA_CHECK_SHAPE(baseline, ["1"])
-
+        if baseline.shape != (1,):
+            raise TypeError(f"baseline shape must be [1]. Got {baseline.shape}")
     if isinstance(focal, Tensor):
-        KORNIA_CHECK_SHAPE(focal, ["1"])
+        if focal.shape != (1,):
+            raise TypeError(f"focal shape must be [1]. Got {focal.shape}")
 
+    # Compute and return result; avoid repeated computation or safety checks
     return baseline * focal / (disparity + 1e-8)

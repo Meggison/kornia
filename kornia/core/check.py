@@ -27,6 +27,8 @@ from typing_extensions import TypeGuard
 
 from kornia.core import Tensor
 
+"""The testing package contains testing-specific utilities."""
+
 __all__ = [
     "KORNIA_CHECK",
     "KORNIA_CHECK_DM_DESC",
