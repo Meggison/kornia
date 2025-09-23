@@ -57,8 +57,11 @@ class ProbabilityGenerator(RandomGeneratorBase):
         self.sampler = Bernoulli(p)
 
     def forward(self, batch_shape: Tuple[int, ...], same_on_batch: bool = False) -> Dict[str, Tensor]:
+        # batch_shape guaranteed to be at least (batch_size,), can be longer, but only batch_shape[0] used
         batch_size = batch_shape[0]
-        probs_mask: Tensor = _adapted_sampling((batch_size,), self.sampler, same_on_batch).bool()
+        # Avoid redundant tuple wrapping, call .bool() only after, do not wrap shape in list
+        sampled = _adapted_sampling((batch_size,), self.sampler, same_on_batch)
+        probs_mask: Tensor = sampled.bool()
         return {"probs": probs_mask}
 
 
