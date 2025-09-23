@@ -23,8 +23,10 @@ from typing import Optional, Union
 
 import torch
 
-from kornia.core import Module, Tensor, concatenate, tensor
+from kornia.core import Module, Tensor, tensor
 from kornia.models.detection.utils import BoxFiltering
+
+"""Post-processor for the RT-DETR model."""
 
 
 def mod(a: Tensor, b: int) -> Tensor:
@@ -85,31 +87,40 @@ class DETRPostProcessor(Module):
             in that image, 6 represent (class_id, confidence_score, x, y, w, h).
 
         """
-        # NOTE: consider using kornia BoundingBox
-        # NOTE: consider having a separate function to convert the detections to a list of bounding boxes
-
-        # https://github.com/PaddlePaddle/PaddleDetection/blob/5d1f888362241790000950e2b63115dc8d1c6019/ppdet/modeling/post_process.py#L446
-        # box format is cxcywh
-        # convert to xywh
-        # bboxes[..., :2] -= bboxes[..., 2:] * 0.5  # in-place operation is not torch.compile()-friendly
-        # TODO: replace using kornia BoundingBox
         cxcy, wh = boxes[..., :2], boxes[..., 2:]
-        boxes_xy = concatenate([cxcy - wh * 0.5, wh], -1)
+        # Fuse cxcy - wh*0.5 and concatenate
+        half_wh = wh * 0.5
+        xy_min = cxcy - half_wh
+        boxes_xy = torch.cat([xy_min, wh], dim=-1)
 
-        # Get dynamic size from the input tensor itself
-        sizes_wh = original_sizes[0].flip(0).unsqueeze(0).unsqueeze(0).repeat(1, 1, 2)
+        # Efficient box scaling
+        # shapes: boxes_xy (N, Q, 4)
+        # Get (img_w, img_h) from original_sizes[0], shape (2,) -> (1, 2)
+        img_size = original_sizes[0].flip(0).unsqueeze(0)  # (1, 2)
+        # Expand to (1, 1, 4): (img_w, img_h, img_w, img_h)
+        scale = img_size.repeat(1, 2)  # (1, 4)
+        boxes_xy = boxes_xy * scale  # (N, Q, 4), broadcast (1, 4)
 
-        boxes_xy = boxes_xy * sizes_wh
-        scores = logits.sigmoid()  # RT-DETR was trained with focal loss. thus sigmoid is used instead of softmax
+        # Fast sigmoid and flatten
+        scores = logits.sigmoid()
+        batch_size, num_queries, num_classes = scores.size()
+        scores_flat = scores.reshape(batch_size, -1)
 
-        # retrieve the boxes with the highest score for each class
-        # https://github.com/lyuwenyu/RT-DETR/blob/b6bf0200b249a6e35b44e0308b6058f55b99696b/rtdetrv2_pytorch/src/zoo/rtdetr/rtdetr_postprocessor.py#L55-L62
-        scores, index = torch.topk(scores.flatten(1), self.num_top_queries, dim=-1)
-        labels = mod(index, self.num_classes)
-        index = index // self.num_classes
-        boxes = boxes_xy.gather(dim=1, index=index.unsqueeze(-1).repeat(1, 1, boxes_xy.shape[-1]))
+        # topk on 2d batched input
+        topk_scores, topk_indices = torch.topk(scores_flat, self.num_top_queries, dim=-1)
 
-        all_boxes = concatenate([labels[..., None], scores[..., None], boxes], -1)
+        # Use divmod vectorized via torch.div and torch.remainder
+        labels = torch.remainder(topk_indices, self.num_classes)
+        indices = torch.div(topk_indices, self.num_classes, rounding_mode="trunc")
+
+        # More efficient gather by constructing index tensor with correct shape up front
+        expanded_indices = indices.unsqueeze(-1).expand(-1, -1, boxes_xy.shape[-1])
+        selected_boxes = torch.gather(boxes_xy, 1, expanded_indices)
+
+        # Stack outputs efficiently
+        all_boxes = torch.cat(
+            [labels.unsqueeze(-1).to(selected_boxes.dtype), topk_scores.unsqueeze(-1), selected_boxes], dim=-1
+        )
 
         if not self.confidence_filtering or self.confidence_threshold == 0:
             return all_boxes
