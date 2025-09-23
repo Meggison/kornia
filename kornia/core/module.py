@@ -144,7 +144,7 @@ class ImageModuleMixIn:
             return from_numpy(np.array(x)).permute(2, 0, 1).float() / 255  # type: ignore
         raise TypeError("Input type not supported")
 
-    def to_numpy(self, x: Any) -> np.array:  # type: ignore
+    def to_numpy(self, x: Any) -> np.array:
         """Convert input to numpy array.
 
         Args:
@@ -154,12 +154,14 @@ class ImageModuleMixIn:
             np.array: The converted numpy array.
 
         """
-        if isinstance(x, (Tensor,)):
-            return x.cpu().detach().numpy()
-        if isinstance(x, (np.ndarray,)):  # type: ignore
+        # Shortcut by type check ordering: fastest common path first
+        if isinstance(x, np.ndarray):  # type: ignore
             return x
-        if isinstance(x, (Image.Image,)):  # type: ignore
-            return np.array(x)  # type: ignore
+        elif isinstance(x, Image.Image):  # type: ignore
+            # Use np.asarray to avoid extra data copy where possible (faster than np.array for PIL)
+            return np.asarray(x)  # type: ignore
+        elif isinstance(x, Tensor):
+            return x.cpu().detach().numpy()
         raise TypeError("Input type not supported")
 
     def to_pil(self, x: Any) -> Image.Image:  # type: ignore
