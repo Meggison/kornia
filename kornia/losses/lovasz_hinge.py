@@ -17,9 +17,9 @@
 
 from __future__ import annotations
 
-import torch
 from torch import Tensor, nn
 
+from kornia.core import Tensor
 from kornia.core.check import KORNIA_CHECK_SHAPE
 
 # based on:
@@ -27,13 +27,13 @@ from kornia.core.check import KORNIA_CHECK_SHAPE
 
 
 def lovasz_hinge_loss(pred: Tensor, target: Tensor) -> Tensor:
-    r"""Criterion that computes a surrogate binary intersection-over-union (IoU) loss.
+    """Criterion that computes a surrogate binary intersection-over-union (IoU) loss.
 
     According to [2], we compute the IoU as follows:
 
     .. math::
 
-        \text{IoU}(x, class) = \frac{|X \cap Y|}{|X \cup Y|}
+        \text{IoU}(x, class) = \frac{|X \\cap Y|}{|X \\cup Y|}
 
     [1] approximates this fomular with a surrogate, which is fully differentable.
 
@@ -71,36 +71,32 @@ def lovasz_hinge_loss(pred: Tensor, target: Tensor) -> Tensor:
 
     """
     KORNIA_CHECK_SHAPE(pred, ["B", "1", "H", "W"])
-
     KORNIA_CHECK_SHAPE(target, ["B", "H", "W"])
 
-    if not pred.shape[-2:] == target.shape[-2:]:
+    if pred.shape[-2:] != target.shape[-2:]:
         raise ValueError(f"pred and target shapes must be the same. Got: {pred.shape} and {target.shape}")
-
-    if not pred.device == target.device:
+    if pred.device != target.device:
         raise ValueError(f"pred and target must be in the same device. Got: {pred.device} and {target.device}")
 
-    # flatten pred and target [B, -1] and to float
-    pred_flatten: Tensor = pred.reshape(pred.shape[0], -1)
-    target_flatten: Tensor = target.reshape(target.shape[0], -1)
+    # flatten pred and target [B, -1]
+    B = pred.shape[0]
+    N = pred.shape[-2] * pred.shape[-1]
 
-    # get shapes
-    B, N = pred_flatten.shape
+    pred_flat = pred.view(B, -1)
+    target_flat = target.view(B, -1)
 
-    # compute actual loss
-    signs = 2.0 * target_flatten - 1.0
-    errors = 1.0 - pred_flatten * signs
-    errors_sorted, permutation = errors.sort(dim=1, descending=True)
-    batch_index: Tensor = torch.arange(B, device=pred.device).reshape(-1, 1).repeat(1, N).reshape(-1)
-    target_sorted: Tensor = target_flatten[batch_index, permutation.view(-1)]
-    target_sorted = target_sorted.view(B, N)
-    target_sorted_sum: Tensor = target_sorted.sum(1, keepdim=True)
-    intersection: Tensor = target_sorted_sum - target_sorted.cumsum(1)
-    union: Tensor = target_sorted_sum + (1.0 - target_sorted).cumsum(1)
-    gradient: Tensor = 1.0 - intersection / union
+    signs = 2.0 * target_flat - 1.0
+    errors = 1.0 - pred_flat * signs
+    errors_sorted, perm = errors.sort(dim=1, descending=True)
+    # Use batch row indices and broadcasting instead of explicit repeat/reshape
+    target_sorted = target_flat.gather(1, perm)
+    target_sorted_sum = target_sorted.sum(1, keepdim=True)
+    intersection = target_sorted_sum - target_sorted.cumsum(1)
+    union = target_sorted_sum + (1.0 - target_sorted).cumsum(1)
+    gradient = 1.0 - intersection / union
     if N > 1:
         gradient[..., 1:] = gradient[..., 1:] - gradient[..., :-1]
-    loss: Tensor = (errors_sorted.relu() * gradient).sum(1).mean()
+    loss = (errors_sorted.relu() * gradient).sum(1).mean()
     return loss
 
 
