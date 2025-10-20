@@ -92,6 +92,45 @@ class Quaternion(Module):
         # KORNIA_CHECK_SHAPE(data, ["B", "4"])  # FIXME: resolve shape bugs. @edgarriba
         self._data = Parameter(data)
 
+    def _to_scalar_quaternion(self, value: Union[Tensor, float]) -> "Quaternion":
+        """Convert a scalar, tensor, or numeric value to a scalar quaternion.
+
+        A scalar quaternion has the form [real, 0, 0, 0] where real is the input value.
+
+        Args:
+            value: The scalar, tensor, or numeric value to convert.
+
+        Returns:
+            A Quaternion object representing the scalar quaternion.
+        """
+        if isinstance(value, (int, float)):
+            value = torch.tensor(value, device=self.data.device, dtype=self.data.dtype)
+        elif isinstance(value, torch.Tensor):
+            value = value.to(device=self.data.device, dtype=self.data.dtype)
+
+        # Check if the value is broadcastable with the real part
+        try:
+            broadcasted = self.real + value
+        except RuntimeError as e:
+            raise ValueError(f"Cannot broadcast scalar/tensor with quaternion: {e}") from e
+
+        # Create scalar quaternion: [value, 0, 0, 0]
+        # Expand value to match the broadcasted shape, then add quaternion dimension
+        if value.dim() == 0:  # scalar
+            # Expand to match the broadcasted shape
+            expanded_value = value.expand_as(broadcasted)
+        else:
+            # Use broadcasting to get the right shape
+            expanded_value = torch.broadcast_to(value, broadcasted.shape)
+
+        # Create zeros for the imaginary part
+        zeros = torch.zeros_like(expanded_value).unsqueeze(-1).expand(*expanded_value.shape, 3)
+
+        # Stack real and imaginary parts: [real, 0, 0, 0]
+        scalar_quat_data = torch.cat([expanded_value.unsqueeze(-1), zeros], dim=-1)
+
+        return Quaternion(scalar_quat_data)
+
     def __repr__(self) -> str:
         return f"{self.data}"
 
@@ -109,11 +148,11 @@ class Quaternion(Module):
         """
         return Quaternion(-self.data)
 
-    def __add__(self, right: "Quaternion") -> "Quaternion":
-        """Add a given quaternion.
+    def __add__(self, right: Union["Quaternion", Tensor, float]) -> "Quaternion":
+        """Add a given quaternion, scalar, or tensor.
 
         Args:
-            right: the quaternion to add.
+            right: the quaternion, scalar, or tensor to add.
 
         Example:
             >>> q1 = Quaternion.identity()
@@ -124,14 +163,17 @@ class Quaternion(Module):
             tensor([3., 0., 1., 1.], requires_grad=True)
 
         """
-        KORNIA_CHECK_TYPE(right, Quaternion)
-        return Quaternion(self.data + right.data)
+        if isinstance(right, Quaternion):
+            return Quaternion(self.data + right.data)
+        else:
+            right_quat = self._to_scalar_quaternion(right)
+            return Quaternion(self.data + right_quat.data)
 
-    def __sub__(self, right: "Quaternion") -> "Quaternion":
-        """Subtract a given quaternion.
+    def __sub__(self, right: Union["Quaternion", Tensor, float]) -> "Quaternion":
+        """Subtract a given quaternion, scalar, or tensor.
 
         Args:
-            right: the quaternion to subtract.
+            right: the quaternion, scalar, or tensor to subtract.
 
         Example:
             >>> q1 = Quaternion(tensor([2., 0., 1., 1.]))
@@ -142,27 +184,74 @@ class Quaternion(Module):
             tensor([1., 0., 1., 1.], requires_grad=True)
 
         """
-        KORNIA_CHECK_TYPE(right, Quaternion)
-        return Quaternion(self.data - right.data)
+        if isinstance(right, Quaternion):
+            return Quaternion(self.data - right.data)
+        else:
+            right_quat = self._to_scalar_quaternion(right)
+            return Quaternion(self.data - right_quat.data)
 
-    def __mul__(self, right: "Quaternion") -> "Quaternion":
-        KORNIA_CHECK_TYPE(right, Quaternion)
-        new_real = self.real * right.real - batched_dot_product(self.vec, right.vec)
-        new_vec = (
-            self.real[..., None] * right.vec
-            + right.real[..., None] * self.vec
-            + torch.linalg.cross(self.vec, right.vec, dim=-1)
-        )
-        return Quaternion(concatenate((new_real[..., None], new_vec), -1))
+    def __mul__(self, right: Union["Quaternion", Tensor, float]) -> "Quaternion":
+        # If right is a Quaternion, do quaternion multiplication
+        if isinstance(right, Quaternion):
+            new_real = self.real * right.real - batched_dot_product(self.vec, right.vec)
+            new_vec = (
+                self.real[..., None] * right.vec
+                + right.real[..., None] * self.vec
+                + torch.linalg.cross(self.vec, right.vec, dim=-1)
+            )
+            return Quaternion(concatenate((new_real[..., None], new_vec), -1))
 
-    def __div__(self, right: Union[Tensor, "Quaternion"]) -> "Quaternion":
-        if isinstance(right, Tensor):
-            return Quaternion(self.data / right[..., None])
-        KORNIA_CHECK_TYPE(right, Quaternion)
-        return self * right.inv()
+        # If right is a scalar/tensor, convert to scalar quaternion and multiply
+        else:
+            right_quat = self._to_scalar_quaternion(right)
+            return self * right_quat
 
-    def __truediv__(self, right: "Quaternion") -> "Quaternion":
+    def __rmul__(self, left: Union[Tensor, float]) -> "Quaternion":
+        """Right multiplication (left * self) where left is a scalar or tensor."""
+        # Convert left to scalar quaternion and multiply
+        left_quat = self._to_scalar_quaternion(left)
+        return left_quat * self
+
+    def __div__(self, right: Union[Tensor, "Quaternion", float]) -> "Quaternion":
+        if isinstance(right, Quaternion):
+            return self * right.inv()
+        else:
+            # For scalars/tensors, just divide the quaternion data directly
+            if isinstance(right, (int, float)):
+                right_tensor = torch.tensor(right, device=self.data.device, dtype=self.data.dtype)
+            else:
+                right_tensor = right.to(device=self.data.device, dtype=self.data.dtype)
+
+            # For division by scalar, expand to [right, right, right, right] for element-wise division
+            if right_tensor.dim() == 0:  # scalar
+                divisor = right_tensor.expand_as(self.data[..., 0]).unsqueeze(-1).expand_as(self.data)
+            else:
+                # Broadcast the tensor to match the quaternion dimensions
+                divisor = right_tensor.unsqueeze(-1).expand_as(self.data)
+
+            return Quaternion(self.data / divisor)
+
+    def __truediv__(self, right: Union[Tensor, "Quaternion", float]) -> "Quaternion":
         return self.__div__(right)
+
+    def __radd__(self, left: Union[Tensor, float]) -> "Quaternion":
+        """Right addition (left + self) where left is a scalar or tensor."""
+        left_quat = self._to_scalar_quaternion(left)
+        return left_quat + self
+
+    def __rsub__(self, left: Union[Tensor, float]) -> "Quaternion":
+        """Right subtraction (left - self) where left is a scalar or tensor."""
+        left_quat = self._to_scalar_quaternion(left)
+        return left_quat - self
+
+    def __rtruediv__(self, left: Union[Tensor, float]) -> "Quaternion":
+        """Right division (left / self) where left is a scalar or tensor."""
+        left_quat = self._to_scalar_quaternion(left)
+        return left_quat / self
+
+    def __rdiv__(self, left: Union[Tensor, float]) -> "Quaternion":
+        """Right division (left / self) where left is a scalar or tensor."""
+        return self.__rtruediv__(left)
 
     def __pow__(self, t: float) -> "Quaternion":
         """Return the power of a quaternion raised to exponent t.
