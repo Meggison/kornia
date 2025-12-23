@@ -166,12 +166,15 @@ def affine(
 
     """
     # warping needs data in the shape of BCHW
-    is_unbatched: bool = tensor.ndimension() == 3
+    is_unbatched: bool = tensor.dim() == 3
     if is_unbatched:
         tensor = torch.unsqueeze(tensor, dim=0)
 
     # we enforce broadcasting since by default grid_sample it does not
     # give support for that
+    if tensor.shape[0] == 1 and matrix.shape[0] != 1:
+        tensor = tensor.expand(matrix.shape[0], tensor.shape[1], tensor.shape[2], tensor.shape[3])
+
     matrix = matrix.expand(tensor.shape[0], -1, -1)
 
     # warp the input tensor
@@ -217,7 +220,7 @@ def affine3d(
 
     """
     # warping needs data in the shape of BCDHW
-    is_unbatched: bool = tensor.ndimension() == 4
+    is_unbatched: bool = tensor.dim() == 4
     if is_unbatched:
         tensor = torch.unsqueeze(tensor, dim=0)
 
@@ -774,9 +777,9 @@ class Affine(Module):
             must have a shape of (B), where B is the batch size.
         translation: Amount of pixels for translation in x- and y-direction. The tensor must
             have a shape of (B, 2), where B is the batch size and the last dimension contains dx and dy.
-        scale_factor: Factor for scaling. The tensor must have a shape of (B), where B is the
-            batch size.
-        shear: Angles in degrees for shearing in x- and y-direction around the center. The
+        scale_factor: Factor for scaling. The tensor must have a shape of (B,2), where B is the
+            batch size and the last dimension contains scale factors for x and y direction.
+        shear: Factor for shearing in x- and y-direction around the center. The
             tensor must have a shape of (B, 2), where B is the batch size and the last dimension contains sx and sy.
         center: Transformation center in pixels. The tensor must have a shape of (B, 2), where
             B is the batch size and the last dimension contains cx and cy. Defaults to the center of image to be
